@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VivoHealthBridge</string>
+    <string name="accessibility_service_description">Reads health data from Vivo Health app and syncs it to Health Connect. This service reads text displayed on screen when Vivo Health is open to extract your health metrics.</string>
+    
+    <!-- Permissions & Health Connect -->
+    <string name="permissions_rationale_title">Health Connect Permissions</string>
+    <string name="permissions_rationale_desc">VivoHealthBridge requires permissions to read and write your health metrics (steps, heart rate, sleep, blood oxygen, HRV, weight, exercise) to synchronize them seamlessly from Vivo Health into Google Health Connect.</string>
+    <string name="grant_permissions">Grant Permissions</string>
+    <string name="health_connect_not_installed">Health Connect is not available on this device.</string>
+    <string name="install_health_connect">Install Health Connect</string>
+    <string name="health_connect_status_connected">Connected to Health Connect</string>
+    <string name="health_connect_status_disconnected">Not Connected</string>
+
+    <!-- Accessibility Service Status -->
+    <string name="accessibility_status_title">Accessibility Service</string>
+    <string name="accessibility_enabled">Enabled</string>
+    <string name="accessibility_disabled">Disabled</string>
+    <string name="enable_accessibility">Enable Accessibility Service</string>
+    <string name="accessibility_rationale">The accessibility service automates data extraction from the Vivo Health app by reading health metric cards visible on your screen.</string>
+
+    <!-- Actions & Status -->
+    <string name="sync_now">Sync Now</string>
+    <string name="open_vivo_health">Open Vivo Health</string>
+    <string name="sync_in_progress">Syncing data...</string>
+    <string name="sync_success">Sync Completed Successfully</string>
+    <string name="sync_failed">Sync Failed</string>
+    <string name="last_sync">Last synced: %1$s</string>
+    <string name="never_synced">Never synced</string>
+
+    <!-- Metrics -->
+    <string name="metric_steps">Steps</string>
+    <string name="metric_heart_rate">Heart Rate</string>
+    <string name="metric_sleep">Sleep</string>
+    <string name="metric_spo2">SpO2</string>
+    <string name="metric_hrv">HRV</string>
+    <string name="metric_weight">Weight</string>
+    <string name="metric_exercise">Exercise</string>
+</resources>
