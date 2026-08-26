@@ -4,8 +4,11 @@ import android.content.Intent
 import android.provider.Settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
@@ -19,6 +22,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.vivohealthbridge.data.models.DailyActivity
+import com.vivohealthbridge.data.models.SleepDetail
 import com.vivohealthbridge.viewmodel.MainViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -32,8 +37,13 @@ fun DashboardScreen(
     onNavigateToManualEntry: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val progress by viewModel.syncProgress.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // The automation runs in the accessibility service and the Health Connect
+    // writes run here, so a sync is "in flight" while either one is busy.
+    val syncing = uiState.isSyncing || progress.active
 
     LaunchedEffect(Unit) { viewModel.checkStatus() }
 
@@ -66,7 +76,6 @@ fun DashboardScreen(
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Warnings
             if (!uiState.isAccessibilityEnabled) {
                 WarningCard(
                     message = "Accessibility Service is not enabled. Auto-sync won't work.",
@@ -94,7 +103,7 @@ fun DashboardScreen(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            // Sync Button
+            // ── Sync control ──────────────────────────────────────
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -107,19 +116,27 @@ fun DashboardScreen(
                         .padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    if (uiState.isSyncing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(48.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                    if (syncing) {
+                        if (progress.percent > 0) {
+                            LinearProgressIndicator(
+                                progress = { progress.percent / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
                         Spacer(modifier = Modifier.height(12.dp))
-                        Text("Syncing from Vivo Health...", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            com.vivohealthbridge.service.VivoHealthAccessibilityService.currentStepDescription,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text(progress.step, style = MaterialTheme.typography.bodyLarge)
+                        if (progress.detail.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                progress.detail,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(onClick = { viewModel.cancelSync() }) { Text("Cancel") }
                     } else {
                         Button(
                             onClick = { viewModel.startAutoSync(context) },
@@ -148,127 +165,36 @@ fun DashboardScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Last synced data cards
-            uiState.lastSyncedData?.let { data ->
+            val data = uiState.lastSyncedData
+            if (data == null) {
+                Spacer(modifier = Modifier.weight(1f))
                 Text(
-                    "Last Synced Data",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp)
+                    "No data synced yet.\nTap 'Auto-Sync' or use Manual Entry.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
+                Spacer(modifier = Modifier.weight(1f))
+            } else {
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    // ── Sleep card (primary) ──────────────────
-                    data.sleepTotalMinutes?.let { sleep ->
-                        item {
-                            MetricCard(
-                                emoji = "😴",
-                                title = "Sleep",
-                                value = "${sleep / 60}h ${sleep % 60}m",
-                                subtitle = buildString {
-                                    data.sleepScore?.let { append("Score: $it  ") }
-                                    data.sleepStartTime?.let { append("$it") }
-                                    data.sleepEndTime?.let { append("–$it") }
-                                }.ifBlank { null }
-                            )
-                        }
+                    // ══ Activity rings — read first, top of the Vivo home ══
+                    data.activity?.takeIf { it.hasData() }?.let { activity ->
+                        item(span = { GridItemSpan(maxLineSpan) }) { SectionHeader("Activity") }
+                        activityCards(activity)
                     }
 
-                    // ── Sleep stages breakdown ────────────────
-                    if (data.deepSleepMinutes != null || data.lightSleepMinutes != null || data.remSleepMinutes != null) {
-                        item {
-                            MetricCard(
-                                emoji = "📊",
-                                title = "Sleep Stages",
-                                value = listOfNotNull(
-                                    data.deepSleepMinutes?.let { "Deep ${it / 60}h${it % 60}m" },
-                                    data.lightSleepMinutes?.let { "Light ${it / 60}h${it % 60}m" },
-                                    data.remSleepMinutes?.let { "REM ${it / 60}h${it % 60}m" }
-                                ).joinToString("\n"),
-                                subtitle = listOfNotNull(
-                                    data.deepSleepPct?.let { "D:$it%" },
-                                    data.lightSleepPct?.let { "L:$it%" },
-                                    data.remSleepPct?.let { "R:$it%" }
-                                ).joinToString("  ").ifBlank { null }
-                            )
-                        }
+                    // ══ Sleep — the detail screen, in on-screen order ══════
+                    data.sleep?.takeIf { it.hasData() }?.let { sleep ->
+                        item(span = { GridItemSpan(maxLineSpan) }) { SectionHeader("Sleep") }
+                        sleepCards(sleep)
                     }
 
-                    // ── Sleeping heart rate range ─────────────
-                    if (data.sleepHeartRateMin != null && data.sleepHeartRateMax != null) {
-                        item {
-                            MetricCard(
-                                emoji = "💓",
-                                title = "Sleep HR",
-                                value = "${data.sleepHeartRateMin}–${data.sleepHeartRateMax} bpm"
-                            )
-                        }
-                    }
-
-                    // ── Sleep respiratory rate ────────────────
-                    if (data.sleepRespiratoryRateMin != null && data.sleepRespiratoryRateMax != null) {
-                        item {
-                            MetricCard(
-                                emoji = "🫁",
-                                title = "Resp Rate",
-                                value = "${data.sleepRespiratoryRateMin}–${data.sleepRespiratoryRateMax}/min"
-                            )
-                        }
-                    }
-
-                    // ── Sleep SpO2 range ─────────────────────
-                    if (data.sleepSpo2Min != null && data.sleepSpo2Max != null) {
-                        item {
-                            MetricCard(
-                                emoji = "🩸",
-                                title = "Sleep SpO2",
-                                value = "${data.sleepSpo2Min}–${data.sleepSpo2Max}%",
-                                subtitle = data.averageSleepSpo2?.let { "Avg: $it%" }
-                            )
-                        }
-                    }
-
-                    // ── Sleep HRV ─────────────────────────────
-                    if (data.sleepHrvMin != null && data.sleepHrvMax != null) {
-                        item {
-                            MetricCard(
-                                emoji = "📈",
-                                title = "Sleep HRV",
-                                value = "${data.sleepHrvMin}–${data.sleepHrvMax} ms"
-                            )
-                        }
-                    }
-
-                    // ── Awakenings ────────────────────────────
-                    if (data.numberOfAwakenings != null) {
-                        item {
-                            MetricCard(
-                                emoji = "👁️",
-                                title = "Awakenings",
-                                value = "${data.numberOfAwakenings}×",
-                                subtitle = data.awakeMinutes?.let { "${it}min awake" }
-                            )
-                        }
-                    }
-
-                    // ── Deep sleep continuity ─────────────────
-                    data.deepSleepContinuity?.let { continuity ->
-                        item {
-                            MetricCard(
-                                emoji = "🔗",
-                                title = "DS Continuity",
-                                value = continuity
-                            )
-                        }
-                    }
-
-                    // ── Other metrics (non-sleep) ─────────────
+                    // ══ Single metrics (manual entry) ══════════════════════
                     data.heartRateBpm?.let { hr ->
                         item {
                             MetricCard(
@@ -279,44 +205,31 @@ fun DashboardScreen(
                             )
                         }
                     }
-                    data.oxygenSaturation?.let { spo2 ->
-                        item {
-                            MetricCard(emoji = "🫁", title = "SpO2", value = "$spo2%")
-                        }
+                    data.oxygenSaturation?.let {
+                        item { MetricCard(emoji = "🫁", title = "SpO₂", value = "$it%") }
                     }
-                    data.stressLevel?.let { stress ->
+                    data.stressLevel?.let {
                         item {
                             MetricCard(
                                 emoji = "🧠",
                                 title = "Stress",
-                                value = "$stress",
+                                value = "$it",
                                 subtitle = data.stressCategory
                             )
                         }
                     }
-                    data.weightKg?.let { weight ->
-                        item {
-                            MetricCard(emoji = "⚖️", title = "Weight", value = "$weight kg")
-                        }
+                    data.weightKg?.let {
+                        item { MetricCard(emoji = "⚖️", title = "Weight", value = "$it kg") }
                     }
-                    data.steps?.let { steps ->
-                        item {
-                            MetricCard(emoji = "🚶", title = "Steps", value = "$steps")
+
+                    if (uiState.notWritten.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            NotWrittenCard(uiState.notWritten)
                         }
                     }
                 }
-            } ?: run {
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    "No data synced yet.\nTap 'Auto-Sync' or use Manual Entry.",
-                    style = MaterialTheme.typography.bodyLarge,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.weight(1f))
             }
 
-            // Manual entry shortcut
             OutlinedButton(
                 onClick = onNavigateToManualEntry,
                 modifier = Modifier
@@ -324,6 +237,215 @@ fun DashboardScreen(
                     .padding(top = 8.dp)
             ) {
                 Text("✍️ Manual Entry")
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Card groups, in the order the Vivo app shows them
+// ══════════════════════════════════════════════════════════════════
+
+private fun LazyGridScope.activityCards(
+    activity: DailyActivity,
+) {
+    activity.steps?.let { steps ->
+        item {
+            MetricCard(
+                emoji = "🚶",
+                title = "Steps",
+                value = "$steps",
+                subtitle = activity.stepsGoal?.let { "Goal $it" }
+            )
+        }
+    }
+    activity.exerciseMinutes?.let { minutes ->
+        item {
+            MetricCard(
+                emoji = "🏃",
+                title = "Exercise",
+                value = "$minutes min",
+                subtitle = activity.exerciseGoalMinutes?.let { "Goal $it min · app only" }
+                    ?: "app only"
+            )
+        }
+    }
+    activity.activeCalories?.let { calories ->
+        item {
+            MetricCard(
+                emoji = "🔥",
+                title = "Calories",
+                value = "$calories kcal",
+                subtitle = activity.activeCaloriesGoal?.let { "Goal $it kcal" }
+            )
+        }
+    }
+    activity.standHours?.let { hours ->
+        item {
+            MetricCard(
+                emoji = "🧍",
+                title = "Stand",
+                value = "$hours hr",
+                subtitle = activity.standGoalHours?.let { "Goal $it hr · app only" } ?: "app only"
+            )
+        }
+    }
+    activity.distanceKm?.let { km ->
+        item { MetricCard(emoji = "📍", title = "Distance", value = "$km km") }
+    }
+}
+
+private fun LazyGridScope.sleepCards(sleep: SleepDetail) {
+    // 1 · total duration + the hypnogram window
+    sleep.totalMinutes?.let { total ->
+        item {
+            MetricCard(
+                emoji = "😴",
+                title = "Total sleep",
+                value = total.asDuration(),
+                subtitle = if (sleep.bedTime != null && sleep.wakeTime != null) {
+                    "${sleep.bedTime} – ${sleep.wakeTime}"
+                } else {
+                    null
+                }
+            )
+        }
+    }
+
+    // 2 · the sliding vitals cards
+    sleep.heartRate?.let {
+        item { MetricCard(emoji = "💓", title = "Sleep HR", value = it.format("bpm")) }
+    }
+    sleep.respiratoryRate?.let {
+        item { MetricCard(emoji = "🫁", title = "Respiratory", value = it.format("/min")) }
+    }
+    sleep.spo2?.let {
+        item {
+            MetricCard(
+                emoji = "🩸",
+                title = "Sleep SpO₂",
+                value = it.format("%"),
+                subtitle = sleep.averageSpo2?.let { avg -> "Avg $avg%" }
+            )
+        }
+    }
+    sleep.hrv?.let {
+        item { MetricCard(emoji = "📈", title = "Sleep HRV", value = it.format("ms")) }
+    }
+
+    // 3 · the score block
+    sleep.score?.let { score ->
+        item {
+            MetricCard(
+                emoji = "🏅",
+                title = "Sleep score",
+                value = "$score pts",
+                subtitle = sleep.scoreLabel
+            )
+        }
+    }
+
+    // 4 · "More analysis"
+    if (sleep.deepMinutes != null || sleep.lightMinutes != null || sleep.remMinutes != null) {
+        item {
+            MetricCard(
+                emoji = "📊",
+                title = "Stages",
+                value = listOfNotNull(
+                    sleep.deepMinutes?.let { "Deep ${it.asDuration()}" },
+                    sleep.lightMinutes?.let { "Light ${it.asDuration()}" },
+                    sleep.remMinutes?.let { "REM ${it.asDuration()}" },
+                ).joinToString("\n"),
+                valueStyleSmall = true,
+                subtitle = listOfNotNull(
+                    sleep.deepPercent?.let { "D $it%" },
+                    sleep.lightPercent?.let { "L $it%" },
+                    sleep.remPercent?.let { "R $it%" },
+                ).joinToString("  ").ifBlank { null }
+                    ?.let { if (sleep.stagesDerived) "$it (derived)" else it }
+            )
+        }
+    }
+    if (sleep.deepRating != null || sleep.lightRating != null || sleep.remRating != null) {
+        item {
+            MetricCard(
+                emoji = "⚖️",
+                title = "Proportions",
+                value = listOfNotNull(
+                    sleep.deepRating?.let { "Deep $it" },
+                    sleep.lightRating?.let { "Light $it" },
+                    sleep.remRating?.let { "REM $it" },
+                ).joinToString("\n"),
+                valueStyleSmall = true,
+            )
+        }
+    }
+    sleep.awakenings?.let { count ->
+        item {
+            MetricCard(
+                emoji = "👁️",
+                title = "Awakenings",
+                value = "$count×",
+                subtitle = sleep.awakeMinutes?.let { "${it.asDuration()} awake" }
+            )
+        }
+    }
+    sleep.continuityScore?.let { score ->
+        item {
+            MetricCard(
+                emoji = "🔗",
+                title = "Deep continuity",
+                value = "$score pts",
+                subtitle = sleep.continuityRating
+            )
+        }
+    }
+}
+
+private fun Int.asDuration(): String =
+    if (this >= 60) "${this / 60}h ${this % 60}m" else "${this}m"
+
+// ══════════════════════════════════════════════════════════════════
+//  Pieces
+// ══════════════════════════════════════════════════════════════════
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp, bottom = 4.dp)
+    )
+}
+
+@Composable
+private fun NotWrittenCard(items: List<String>) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Row(modifier = Modifier.padding(12.dp)) {
+            Icon(
+                Icons.Filled.Info,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Column {
+                Text(
+                    "Read, but not sent to Health Connect",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                items.forEach {
+                    Text(
+                        "• $it",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
@@ -352,7 +474,13 @@ private fun WarningCard(message: String, buttonText: String, onClick: () -> Unit
 }
 
 @Composable
-private fun MetricCard(emoji: String, title: String, value: String, subtitle: String? = null) {
+private fun MetricCard(
+    emoji: String,
+    title: String,
+    value: String,
+    subtitle: String? = null,
+    valueStyleSmall: Boolean = false,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
@@ -361,9 +489,21 @@ private fun MetricCard(emoji: String, title: String, value: String, subtitle: St
             Text(emoji, fontSize = 24.sp)
             Spacer(modifier = Modifier.height(4.dp))
             Text(title, style = MaterialTheme.typography.labelMedium)
-            Text(value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                value,
+                style = if (valueStyleSmall) {
+                    MaterialTheme.typography.bodyMedium
+                } else {
+                    MaterialTheme.typography.headlineSmall
+                },
+                fontWeight = FontWeight.Bold
+            )
             subtitle?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

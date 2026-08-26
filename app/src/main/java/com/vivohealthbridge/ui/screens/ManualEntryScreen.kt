@@ -12,8 +12,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.vivohealthbridge.data.models.DailyActivity
 import com.vivohealthbridge.data.models.ParsedHealthData
+import com.vivohealthbridge.data.models.SleepDetail
 import com.vivohealthbridge.viewmodel.MainViewModel
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,12 +137,14 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val eH = endHour.toIntOrNull() ?: 7; val eM = endMin.toIntOrNull() ?: 0
                     val totalMins = if (eH < sH) (24 - sH + eH) * 60 + (eM - sM) else (eH - sH) * 60 + (eM - sM)
                     val data = ParsedHealthData(
-                        sleepTotalMinutes = totalMins,
-                        sleepStartTime = String.format("%02d:%02d", sH, sM),
-                        sleepEndTime = String.format("%02d:%02d", eH, eM),
-                        deepSleepMinutes = ((deepH.toIntOrNull() ?: 0) * 60 + (deepM.toIntOrNull() ?: 0)).takeIf { it > 0 },
-                        lightSleepMinutes = ((lightH.toIntOrNull() ?: 0) * 60 + (lightM.toIntOrNull() ?: 0)).takeIf { it > 0 },
-                        remSleepMinutes = ((remH.toIntOrNull() ?: 0) * 60 + (remM.toIntOrNull() ?: 0)).takeIf { it > 0 }
+                        sleep = SleepDetail(
+                            totalMinutes = totalMins,
+                            bedTime = String.format(Locale.US, "%02d:%02d", sH, sM),
+                            wakeTime = String.format(Locale.US, "%02d:%02d", eH, eM),
+                            deepMinutes = ((deepH.toIntOrNull() ?: 0) * 60 + (deepM.toIntOrNull() ?: 0)).takeIf { it > 0 },
+                            lightMinutes = ((lightH.toIntOrNull() ?: 0) * 60 + (lightM.toIntOrNull() ?: 0)).takeIf { it > 0 },
+                            remMinutes = ((remH.toIntOrNull() ?: 0) * 60 + (remM.toIntOrNull() ?: 0)).takeIf { it > 0 }
+                        )
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "Sleep: ${totalMins / 60}h ${totalMins % 60}m synced!"
@@ -200,7 +205,7 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             Button(
                 onClick = {
                     val v = steps.toLongOrNull() ?: return@Button
-                    viewModel.syncManualEntry(ParsedHealthData(steps = v))
+                    viewModel.syncManualEntry(ParsedHealthData(activity = DailyActivity(steps = v)))
                     showSuccess = "Steps: $v synced!"; steps = ""
                 },
                 enabled = steps.isNotEmpty(),

@@ -13,9 +13,10 @@ import com.vivohealthbridge.VivoHealthBridgeApp
 import com.vivohealthbridge.data.models.HealthMetricType
 import com.vivohealthbridge.data.models.ParsedHealthData
 import com.vivohealthbridge.data.models.SyncStatus
-import com.vivohealthbridge.data.db.SyncRecord
 import com.vivohealthbridge.service.HealthConnectManager
+import com.vivohealthbridge.service.SyncProgress
 import com.vivohealthbridge.service.VivoHealthAccessibilityService
+import com.vivohealthbridge.service.WriteReport
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,8 @@ data class UiState(
     val lastSyncedData: ParsedHealthData? = null,
     val lastSyncTime: Long? = null,
     val syncResult: String? = null,
+    /** Metrics that were read but deliberately not pushed to Health Connect. */
+    val notWritten: List<String> = emptyList(),
     val isAccessibilityEnabled: Boolean = false,
     val isHealthConnectAvailable: Boolean = false,
     val healthConnectPermissionsGranted: Boolean = false,
@@ -41,11 +44,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val app = application as VivoHealthBridgeApp
-    private val healthConnectManager = app.healthConnectManager
+    private val healthConnectManager: HealthConnectManager = app.healthConnectManager
     private val syncRepository = app.syncRepository
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    /** Live step-by-step progress of the on-screen automation. */
+    val syncProgress: StateFlow<SyncProgress> = VivoHealthAccessibilityService.progress
 
     val syncHistory = syncRepository.getAllRecords()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -76,127 +82,213 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = _uiState.value.copy(
             healthConnectPermissionsGranted = granted.isNotEmpty()
         )
+        checkStatus()
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  Automated sync
+    // ══════════════════════════════════════════════════════════════
+
     fun startAutoSync(context: Context) {
-        if (_uiState.value.isSyncing) return
+        if (_uiState.value.isSyncing || VivoHealthAccessibilityService.isSyncing) return
+
+        // Without the service there is nothing to drive the Vivo app, and
+        // launching it would just dump the user into Vivo Health with no way back.
+        if (!VivoHealthAccessibilityService.isServiceRunning()) {
+            _uiState.value = _uiState.value.copy(
+                isAccessibilityEnabled = false,
+                error = "Turn on VivoHealthBridge in Settings → Accessibility first."
+            )
+            return
+        }
 
         _uiState.value = _uiState.value.copy(
             isSyncing = true,
             syncResult = null,
+            notWritten = emptyList(),
             error = null
         )
 
-        // Set up callback from accessibility service
         VivoHealthAccessibilityService.syncCallback = { parsedData ->
-            viewModelScope.launch {
-                handleSyncResult(parsedData)
-            }
+            viewModelScope.launch { handleSyncResult(parsedData) }
         }
 
-        // Start sync in the accessibility service
-        VivoHealthAccessibilityService.startSync()
+        if (!VivoHealthAccessibilityService.startSync()) {
+            VivoHealthAccessibilityService.syncCallback = null
+            _uiState.value = _uiState.value.copy(
+                isSyncing = false,
+                error = "Could not start the accessibility service run."
+            )
+            return
+        }
 
-        // Launch Vivo Health app
-        val launched = launchVivoHealth(context)
-        if (!launched) {
+        if (!launchVivoHealth(context)) {
+            // Drop the callback first so the abort does not report an empty sync.
+            VivoHealthAccessibilityService.syncCallback = null
             VivoHealthAccessibilityService.stopSync()
             _uiState.value = _uiState.value.copy(
                 isSyncing = false,
-                error = "Could not find Vivo Health app. Is it installed?"
+                error = "Could not find the Vivo Health app. Is it installed?"
             )
         }
+    }
+
+    fun cancelSync() {
+        VivoHealthAccessibilityService.syncCallback = null
+        VivoHealthAccessibilityService.stopSync()
+        _uiState.value = _uiState.value.copy(isSyncing = false, syncResult = "Sync cancelled")
     }
 
     fun syncManualEntry(data: ParsedHealthData) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isSyncing = true, syncResult = null, error = null)
-            try {
-                val result = healthConnectManager.syncAll(data)
-                result.onSuccess { count ->
-                    logSyncRecords(data, SyncStatus.SUCCESS)
-                    _uiState.value = _uiState.value.copy(
-                        isSyncing = false,
-                        lastSyncedData = data,
-                        lastSyncTime = System.currentTimeMillis(),
-                        syncResult = "✅ Synced $count record(s) to Health Connect"
-                    )
-                }.onFailure { e ->
-                    logSyncRecords(data, SyncStatus.FAILED)
-                    _uiState.value = _uiState.value.copy(
-                        isSyncing = false,
-                        error = "❌ Sync failed: ${e.message}"
-                    )
-                }
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    isSyncing = false,
-                    error = "❌ Error: ${e.message}"
-                )
-            }
+            _uiState.value = _uiState.value.copy(
+                isSyncing = true, syncResult = null, notWritten = emptyList(), error = null
+            )
+            handleSyncResult(data, automated = false)
         }
     }
 
-    private suspend fun handleSyncResult(data: ParsedHealthData) {
-        try {
-            val result = healthConnectManager.syncAll(data)
-            result.onSuccess { count ->
-                logSyncRecords(data, SyncStatus.SUCCESS)
-                _uiState.value = _uiState.value.copy(
-                    isSyncing = false,
-                    lastSyncedData = data,
-                    lastSyncTime = System.currentTimeMillis(),
-                    syncResult = "✅ Auto-synced $count record(s) to Health Connect"
-                )
-            }.onFailure { e ->
-                logSyncRecords(data, SyncStatus.FAILED)
-                _uiState.value = _uiState.value.copy(
-                    isSyncing = false,
-                    error = "❌ Sync failed: ${e.message}"
-                )
-            }
-        } catch (e: Exception) {
+    private suspend fun handleSyncResult(data: ParsedHealthData, automated: Boolean = true) {
+        if (!data.hasAnyData()) {
             _uiState.value = _uiState.value.copy(
                 isSyncing = false,
-                error = "❌ Error: ${e.message}"
+                error = if (automated) {
+                    "No data was read from Vivo Health. Open the app manually and check " +
+                            "the sleep screen loads, then try again."
+                } else {
+                    "Nothing to sync — every field was empty."
+                }
+            )
+            return
+        }
+
+        val report = try {
+            healthConnectManager.syncAll(data)
+        } catch (e: Exception) {
+            Log.e(TAG, "syncAll threw", e)
+            WriteReport(failed = listOf(e.message ?: e.javaClass.simpleName))
+        }
+
+        val status = when {
+            report.isSuccess -> SyncStatus.SUCCESS
+            report.isPartial -> SyncStatus.PARTIAL
+            else -> SyncStatus.FAILED
+        }
+        logSyncRecords(data, status, report)
+
+        val prefix = if (automated) "Auto-synced" else "Synced"
+        _uiState.value = when {
+            report.isFailure -> _uiState.value.copy(
+                isSyncing = false,
+                lastSyncedData = data,
+                notWritten = report.skipped,
+                error = "Sync failed — ${report.failed.joinToString("; ")}"
+            )
+            else -> _uiState.value.copy(
+                isSyncing = false,
+                lastSyncedData = data,
+                lastSyncTime = System.currentTimeMillis(),
+                notWritten = report.skipped,
+                syncResult = buildString {
+                    append("$prefix ${report.count} record(s) to Health Connect")
+                    if (report.failed.isNotEmpty()) {
+                        append(" · ${report.failed.size} failed: ")
+                        append(report.failed.joinToString("; "))
+                    }
+                },
+                error = null
             )
         }
     }
 
-    private suspend fun logSyncRecords(data: ParsedHealthData, status: SyncStatus) {
-        val statusStr = status.name
-        // Sleep is the primary metric
-        if (data.sleepTotalMinutes != null) {
-            val parts = mutableListOf("${data.sleepTotalMinutes}min")
-            data.sleepScore?.let { parts.add("score:$it") }
-            data.deepSleepMinutes?.let { parts.add("deep:${it}m") }
-            data.lightSleepMinutes?.let { parts.add("light:${it}m") }
-            data.remSleepMinutes?.let { parts.add("rem:${it}m") }
-            data.numberOfAwakenings?.let { parts.add("awake:$it×") }
-            syncRepository.logSync(HealthMetricType.SLEEP.name, parts.joinToString(" "), statusStr)
+    // ══════════════════════════════════════════════════════════════
+    //  Sync log
+    // ══════════════════════════════════════════════════════════════
+
+    private suspend fun logSyncRecords(
+        data: ParsedHealthData,
+        status: SyncStatus,
+        report: WriteReport,
+    ) {
+        val ok = status.name
+        // Metrics we can read but never push get logged as PARTIAL, so the history
+        // shows they were captured without claiming they reached Health Connect.
+        val local = SyncStatus.PARTIAL.name
+
+        data.activity?.let { activity ->
+            activity.steps?.let {
+                val goal = activity.stepsGoal?.let { g -> " / $g" } ?: ""
+                syncRepository.logSync(HealthMetricType.STEPS.name, "$it$goal steps", ok)
+            }
+            activity.distanceKm?.let {
+                syncRepository.logSync(HealthMetricType.DISTANCE.name, "$it km", ok)
+            }
+            activity.activeCalories?.let {
+                val goal = activity.activeCaloriesGoal?.let { g -> " / $g" } ?: ""
+                syncRepository.logSync(HealthMetricType.ACTIVE_CALORIES.name, "$it$goal kcal", ok)
+            }
+            activity.exerciseMinutes?.let {
+                val goal = activity.exerciseGoalMinutes?.let { g -> " / $g" } ?: ""
+                syncRepository.logSync(HealthMetricType.EXERCISE.name, "$it$goal min", local)
+            }
+            activity.standHours?.let {
+                val goal = activity.standGoalHours?.let { g -> " / $g" } ?: ""
+                syncRepository.logSync(HealthMetricType.STAND.name, "$it$goal hr", local)
+            }
         }
-        if (data.sleepHrvMin != null && data.sleepHrvMax != null) {
-            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "Sleep HRV ${data.sleepHrvMin}-${data.sleepHrvMax}ms", statusStr)
+
+        data.sleep?.let { sleep ->
+            val parts = mutableListOf<String>()
+            sleep.totalMinutes?.let { parts.add("${it / 60}h ${it % 60}m") }
+            if (sleep.bedTime != null && sleep.wakeTime != null) {
+                parts.add("${sleep.bedTime}–${sleep.wakeTime}")
+            }
+            sleep.score?.let { parts.add("score $it") }
+            sleep.deepMinutes?.let { parts.add("deep ${it}m") }
+            sleep.lightMinutes?.let { parts.add("light ${it}m") }
+            sleep.remMinutes?.let { parts.add("rem ${it}m") }
+            sleep.awakenings?.let { parts.add("awake ${it}×") }
+            if (parts.isNotEmpty()) {
+                syncRepository.logSync(HealthMetricType.SLEEP.name, parts.joinToString(" · "), ok)
+            }
+
+            sleep.heartRate?.let {
+                syncRepository.logSync(HealthMetricType.HEART_RATE.name, "sleep ${it.format("bpm")}", ok)
+            }
+            sleep.respiratoryRate?.let {
+                syncRepository.logSync(
+                    HealthMetricType.RESPIRATORY_RATE.name, "sleep ${it.format("/min")}", ok
+                )
+            }
+            sleep.spo2?.let {
+                syncRepository.logSync(HealthMetricType.SPO2.name, "sleep ${it.format("%")}", ok)
+            }
+            sleep.averageSpo2?.let {
+                syncRepository.logSync(HealthMetricType.SPO2.name, "sleep avg $it%", ok)
+            }
+            sleep.hrv?.let {
+                syncRepository.logSync(HealthMetricType.HRV.name, "sleep ${it.format("ms")}", ok)
+            }
         }
-        if (data.averageSleepSpo2 != null) {
-            syncRepository.logSync(HealthMetricType.SPO2.name, "Sleep SpO2 avg ${data.averageSleepSpo2}%", statusStr)
+
+        data.heartRateBpm?.let {
+            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "$it bpm", ok)
         }
-        // Non-sleep metrics
-        if (data.heartRateBpm != null) {
-            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "${data.heartRateBpm} bpm", statusStr)
+        data.restingHeartRateBpm?.let {
+            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "resting $it bpm", ok)
         }
-        if (data.oxygenSaturation != null) {
-            syncRepository.logSync(HealthMetricType.SPO2.name, "${data.oxygenSaturation}%", statusStr)
+        data.oxygenSaturation?.let {
+            syncRepository.logSync(HealthMetricType.SPO2.name, "$it%", ok)
         }
-        if (data.stressLevel != null) {
-            syncRepository.logSync(HealthMetricType.STRESS.name, "${data.stressLevel} ${data.stressCategory ?: ""}", statusStr)
+        data.stressLevel?.let {
+            val category = data.stressCategory?.let { c -> " $c" } ?: ""
+            syncRepository.logSync(HealthMetricType.STRESS.name, "$it$category", local)
         }
-        if (data.steps != null) {
-            syncRepository.logSync(HealthMetricType.STEPS.name, "${data.steps} steps", statusStr)
+        data.weightKg?.let {
+            syncRepository.logSync(HealthMetricType.WEIGHT.name, "$it kg", ok)
         }
-        if (data.weightKg != null) {
-            syncRepository.logSync(HealthMetricType.WEIGHT.name, "${data.weightKg} kg", statusStr)
-        }
+
+        Log.d(TAG, "logged sync (${report.summary()})")
     }
 
     fun clearSyncResult() {
@@ -209,17 +301,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════
+    //  Environment checks
+    // ══════════════════════════════════════════════════════════════
+
     private fun launchVivoHealth(context: Context): Boolean {
-        val packageNames = listOf("com.vivo.health", "com.vivo.sports")
-        for (pkg in packageNames) {
+        for (pkg in VivoHealthAccessibilityService.VIVO_HEALTH_PACKAGES) {
             try {
-                val intent = context.packageManager.getLaunchIntentForPackage(pkg)
-                if (intent != null) {
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                    Log.d(TAG, "Launched Vivo Health: $pkg")
-                    return true
-                }
+                val intent = context.packageManager.getLaunchIntentForPackage(pkg) ?: continue
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                Log.d(TAG, "Launched Vivo Health: $pkg")
+                return true
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to launch $pkg", e)
             }
@@ -237,10 +330,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val colonSplitter = TextUtils.SimpleStringSplitter(':')
         colonSplitter.setString(enabledServices)
         while (colonSplitter.hasNext()) {
-            val componentName = colonSplitter.next()
-            if (ComponentName.unflattenFromString(componentName) == expectedName) {
-                return true
-            }
+            if (ComponentName.unflattenFromString(colonSplitter.next()) == expectedName) return true
         }
         return false
     }

@@ -3,30 +3,52 @@ package com.vivohealthbridge.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.content.Intent
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.vivohealthbridge.MainActivity
 import com.vivohealthbridge.data.models.ParsedHealthData
 import com.vivohealthbridge.parser.VivoHealthParser
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/** Observable state of one automated sync pass, for the dashboard to render. */
+data class SyncProgress(
+    val active: Boolean = false,
+    val step: String = "Idle",
+    val detail: String = "",
+    val percent: Int = 0,
+)
 
 /**
- * Accessibility service that automates Vivo Health to extract sleep data.
+ * Drives Vivo Health through the exact sequence a person would follow, reading
+ * each screen with the accessibility tree.
  *
- * Flow (matches the user's manual steps):
- *   1. WAIT_FOR_HOME      – Vivo Health is open, wait for home screen
- *   2. PULL_TO_SYNC       – Swipe down to trigger sync, wait ~20s for "sync complete"
- *   3. CLICK_SLEEP        – Tap the "Sleep" card (first option)
- *   4. WAIT_SLEEP_LOAD    – Wait ~15–20s for the sleep detail to load
- *   5. COLLECT_INITIAL    – Collect texts (total duration, chart labels, first stat card)
- *   6. SWIPE_RIGHT_CARDS  – Swipe right on the stat-card area to reveal
- *                           Respiratory rate → SpO2 → HRV (collect at each step)
- *   7. SCROLL_TO_ANALYSIS – Scroll down to "More analysis"
- *   8. CLICK_MORE_ANALYSIS– Tap "More analysis" if it's a button
- *   9. COLLECT_ANALYSIS   – Collect stage durations, awakenings, continuity, avg SpO2
- *  10. DONE               – Parse everything & deliver via callback
+ * ```
+ *  WAIT_APP      Vivo Health reaches the foreground
+ *  SYNC_GESTURE  drag the top of the list to trigger a watch sync
+ *  SYNC_WAIT     "Syncing…" → "Sync complete"                      (~20 s)
+ *  HOME_COLLECT  scroll to the top, read Steps/Exercise/Calories/Stand
+ *  OPEN_SLEEP    tap the Sleep card
+ *  SLEEP_LOAD    the detail screen renders                         (~15–20 s)
+ *  SLEEP_CARDS   swipe the stat carousel: heart rate → respiratory → SpO₂ → HRV
+ *  SLEEP_SCROLL  scroll down, expand "More analysis", read the stages
+ *  FINISH        parse everything, hand it back, return to this app
+ * ```
+ *
+ * ## Why a ticker and not accessibility events
+ * Vivo Health emits content-changed events in bursts while a chart animates and
+ * then goes silent for seconds at a time. Driving the machine from those events
+ * meant a step could stall forever with nothing to wake it. Instead a single
+ * self-scheduling [tick] runs every [TICK_MS], every step carries its own
+ * deadline, and [WATCHDOG_MS] guarantees the run always ends — with partial data
+ * if need be, never with a spinner that never stops.
  */
 class VivoHealthAccessibilityService : AccessibilityService() {
 
@@ -36,71 +58,112 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         val VIVO_HEALTH_PACKAGES = listOf(
             "com.vivo.health",
             "com.vivo.sports",
+            "com.vivo.healthwidget",
         )
 
         var instance: VivoHealthAccessibilityService? = null
             private set
 
-        var isSyncing = false
-            private set
-
+        /** Invoked once per run with whatever was collected. Cleared by the caller. */
         var syncCallback: ((ParsedHealthData) -> Unit)? = null
 
-        /** Human-readable step for the UI to display. */
-        var currentStepDescription: String = "Idle"
-            private set
+        private val _progress = MutableStateFlow(SyncProgress())
+        val progress: StateFlow<SyncProgress> = _progress.asStateFlow()
 
-        // ── State machine ─────────────────────────────────
-        private var step = Step.IDLE
-        private var collectedSleepTexts = mutableListOf<String>()
-        private var swipeCount = 0
-        private const val MAX_CARD_SWIPES = 4  // HR → Resp → SpO2 → HRV
-        private var retryCount = 0
-        private const val MAX_RETRIES = 4
-        private var syncWaitStart = 0L
-        private const val SYNC_TIMEOUT_MS = 25_000L
-        private var loadWaitStart = 0L
-        private const val LOAD_TIMEOUT_MS = 22_000L
+        val isSyncing: Boolean get() = _progress.value.active
+
+        /** Plain-text step label, for callers that cannot collect a flow. */
+        val currentStepDescription: String get() = _progress.value.step
 
         fun isServiceRunning(): Boolean = instance != null
 
-        fun startSync() {
-            isSyncing = true
-            step = Step.WAIT_FOR_HOME
-            collectedSleepTexts.clear()
-            swipeCount = 0
-            retryCount = 0
-            currentStepDescription = "Waiting for Vivo Health…"
-            Log.d(TAG, "Sync started – waiting for Vivo Health home")
+        /** @return false if the service is not enabled, or a run is already going. */
+        fun startSync(): Boolean {
+            val service = instance ?: run {
+                Log.w(TAG, "startSync ignored – service is not connected")
+                return false
+            }
+            if (isSyncing) {
+                Log.w(TAG, "startSync ignored – already syncing")
+                return false
+            }
+            service.beginRun()
+            return true
         }
 
         fun stopSync() {
-            isSyncing = false
-            step = Step.IDLE
-            currentStepDescription = "Idle"
+            instance?.abortRun("Cancelled")
         }
+
+        // ── Timings ───────────────────────────────────────────────
+        private const val TICK_MS = 900L
+        private const val WATCHDOG_MS = 210_000L
+
+        private const val WAIT_APP_MS = 15_000L
+        private const val SYNC_WAIT_MS = 40_000L
+        private const val SYNC_PROBE_MS = 8_000L      // no sync sign by now → try the other direction
+        private const val HOME_COLLECT_MS = 15_000L
+        private const val OPEN_SLEEP_MS = 15_000L
+        private const val SLEEP_LOAD_MS = 40_000L
+        private const val SLEEP_CARDS_MS = 40_000L
+        private const val SLEEP_SCROLL_MS = 45_000L
+
+        private const val MAX_CARD_SWIPES = 6
+        private const val MAX_ANALYSIS_SCROLLS = 10
+        private const val MAX_TOP_SCROLLS = 4
+        private const val MAX_NODES = 400
+        private const val MAX_DEPTH = 40
     }
 
-    // Steps in the automation flow
-    private enum class Step {
-        IDLE,
-        WAIT_FOR_HOME,
-        PULL_TO_SYNC,
-        WAIT_SYNC_COMPLETE,
-        CLICK_SLEEP,
-        WAIT_SLEEP_LOAD,
-        COLLECT_INITIAL,
-        SWIPE_RIGHT_CARDS,
-        SCROLL_TO_ANALYSIS,
-        CLICK_MORE_ANALYSIS,
-        COLLECT_ANALYSIS,
-        DONE
+    private enum class Step(val label: String, val percent: Int) {
+        IDLE("Idle", 0),
+        WAIT_APP("Opening Vivo Health…", 5),
+        SYNC_GESTURE("Pulling to sync…", 12),
+        SYNC_WAIT("Syncing with watch…", 20),
+        HOME_COLLECT("Reading activity rings…", 40),
+        OPEN_SLEEP("Opening Sleep…", 50),
+        SLEEP_LOAD("Loading sleep data…", 58),
+        SLEEP_CARDS("Reading sleep vitals…", 72),
+        SLEEP_SCROLL("Reading sleep analysis…", 88),
+        FINISH("Saving…", 96),
     }
 
     private val parser = VivoHealthParser()
     private val handler = Handler(Looper.getMainLooper())
-    private var lastEventTime = 0L
-    @Volatile private var isProcessing = false
+
+    private var step = Step.IDLE
+    private var stepDeadline = 0L
+    private var stepStarted = 0L
+    private var runDeadline = 0L
+    private var pausedUntil = 0L
+
+    private val homeCaptures = mutableListOf<List<String>>()
+    private val sleepCaptures = mutableListOf<List<String>>()
+
+    private var pulledDown = false
+    private var pulledUp = false
+    private var sawSyncing = false
+    private var topScrollsLeft = 0
+    private var cardSwipes = 0
+    private var lastCardSignature: String? = null
+    private var analysisScrolls = 0
+    private var expandedAnalysis = false
+    private var lastScrollSignature: String? = null
+    private var unchangedScrolls = 0
+    private var sleepOpenAttempts = 0
+    private var sleepLoadAttempts = 0
+
+    private val ticker = object : Runnable {
+        override fun run() {
+            if (step == Step.IDLE) return
+            try {
+                tick()
+            } catch (t: Throwable) {
+                Log.e(TAG, "tick failed in $step", t)
+            }
+            if (step != Step.IDLE) handler.postDelayed(this, TICK_MS)
+        }
+    }
 
     // ─────────────────────────────────────────────────────
     //  Service lifecycle
@@ -109,432 +172,620 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.d(TAG, "Accessibility Service connected")
-
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
-            flags = AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
+            flags = flags or
+                    AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-            notificationTimeout = 300
+            notificationTimeout = 200
         }
+        Log.d(TAG, "connected (gestures=${serviceInfo.capabilities and
+                AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES})")
+    }
+
+    /** The machine polls; events are only useful as a hint to look sooner. */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+
+    override fun onInterrupt() {
+        Log.w(TAG, "interrupted")
+        if (step != Step.IDLE) abortRun("Interrupted")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacks(ticker)
+        if (step != Step.IDLE) abortRun("Service stopped")
+        instance = null
+        Log.d(TAG, "destroyed")
     }
 
     // ─────────────────────────────────────────────────────
-    //  Event handling
+    //  Run control
     // ─────────────────────────────────────────────────────
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!isSyncing || event == null || isProcessing) return
+    private fun beginRun() {
+        homeCaptures.clear()
+        sleepCaptures.clear()
+        pulledDown = false
+        pulledUp = false
+        sawSyncing = false
+        topScrollsLeft = MAX_TOP_SCROLLS
+        cardSwipes = 0
+        lastCardSignature = null
+        analysisScrolls = 0
+        expandedAnalysis = false
+        lastScrollSignature = null
+        unchangedScrolls = 0
+        sleepOpenAttempts = 0
+        sleepLoadAttempts = 0
+        pausedUntil = 0L
+        runDeadline = now() + WATCHDOG_MS
 
-        val packageName = event.packageName?.toString() ?: return
-        val isVivoHealth = VIVO_HEALTH_PACKAGES.any { packageName.contains(it, ignoreCase = true) } ||
-                (packageName.contains("vivo", ignoreCase = true) && packageName.contains("health", ignoreCase = true))
-        if (!isVivoHealth) return
+        goTo(Step.WAIT_APP, WAIT_APP_MS)
+        handler.removeCallbacks(ticker)
+        handler.post(ticker)
+        Log.d(TAG, "run started")
+    }
 
-        val now = System.currentTimeMillis()
-        if (now - lastEventTime < 800) return
-        lastEventTime = now
+    private fun abortRun(reason: String) {
+        Log.w(TAG, "run aborted: $reason")
+        step = Step.IDLE
+        handler.removeCallbacks(ticker)
+        _progress.value = SyncProgress(active = false, step = reason)
+        val callback = syncCallback
+        syncCallback = null
+        callback?.invoke(ParsedHealthData())
+    }
 
-        when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                handler.removeCallbacksAndMessages(null)
-                handler.postDelayed({ processStep() }, 1200)
+    private fun goTo(next: Step, timeoutMs: Long, detail: String = "") {
+        step = next
+        stepStarted = now()
+        stepDeadline = stepStarted + timeoutMs
+        publish(detail)
+        Log.d(TAG, "→ $next (${timeoutMs}ms) $detail")
+    }
+
+    private fun publish(detail: String = "") {
+        _progress.value = SyncProgress(
+            active = step != Step.IDLE,
+            step = step.label,
+            detail = detail,
+            percent = step.percent,
+        )
+    }
+
+    private fun pause(ms: Long) {
+        pausedUntil = now() + ms
+    }
+
+    private fun now() = System.currentTimeMillis()
+
+    // ─────────────────────────────────────────────────────
+    //  The machine
+    // ─────────────────────────────────────────────────────
+
+    private fun tick() {
+        if (now() > runDeadline) {
+            Log.w(TAG, "watchdog fired in $step – finishing with partial data")
+            finish()
+            return
+        }
+        if (now() < pausedUntil) return
+
+        val root = rootInActiveWindow
+        if (root == null) {
+            // Between windows. Only WAIT_APP can time out on this.
+            if (step == Step.WAIT_APP && now() > stepDeadline) {
+                abortRun("Vivo Health did not open")
             }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────
-    //  State machine dispatcher
-    // ─────────────────────────────────────────────────────
-
-    private fun processStep() {
-        if (!isSyncing || isProcessing) return
-        isProcessing = true
-
-        try {
-            val root = rootInActiveWindow ?: run {
-                isProcessing = false
-                return
-            }
-
-            val texts = mutableListOf<String>()
-            collectAllText(root, texts)
-
-            Log.d(TAG, "Step=$step, collected ${texts.size} text nodes")
-            texts.take(30).forEachIndexed { idx, t -> Log.v(TAG, "  [$idx] \"$t\"") }
-
-            when (step) {
-                Step.WAIT_FOR_HOME -> handleHome(root, texts)
-                Step.PULL_TO_SYNC -> handlePullToSync(root)
-                Step.WAIT_SYNC_COMPLETE -> handleWaitSyncComplete(texts)
-                Step.CLICK_SLEEP -> handleClickSleep(root)
-                Step.WAIT_SLEEP_LOAD -> handleWaitSleepLoad(texts)
-                Step.COLLECT_INITIAL -> handleCollectInitial(root, texts)
-                Step.SWIPE_RIGHT_CARDS -> handleSwipeRightCards(root, texts)
-                Step.SCROLL_TO_ANALYSIS -> handleScrollToAnalysis(root, texts)
-                Step.CLICK_MORE_ANALYSIS -> handleClickMoreAnalysis(root, texts)
-                Step.COLLECT_ANALYSIS -> handleCollectAnalysis(texts)
-                Step.DONE -> { /* already finished */ }
-                Step.IDLE -> { /* not syncing */ }
-            }
-
-            root.recycle()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in processStep ($step)", e)
-        } finally {
-            isProcessing = false
-        }
-    }
-
-    // ─────────────────────────────────────────────────────
-    //  Step handlers
-    // ─────────────────────────────────────────────────────
-
-    /** Step 1: Home screen detected → pull down to sync. */
-    private fun handleHome(root: AccessibilityNodeInfo, texts: List<String>) {
-        currentStepDescription = "Home detected, pulling down to sync…"
-        Log.d(TAG, "Home screen detected, performing pull-to-sync")
-        step = Step.PULL_TO_SYNC
-        // Small delay then swipe down
-        handler.postDelayed({ processStep() }, 500)
-    }
-
-    /** Step 2: Perform a swipe-down gesture on the home screen. */
-    private fun handlePullToSync(root: AccessibilityNodeInfo) {
-        currentStepDescription = "Syncing data from watch…"
-        Log.d(TAG, "Performing pull-to-sync gesture")
-        performSwipeDown()
-        step = Step.WAIT_SYNC_COMPLETE
-        syncWaitStart = System.currentTimeMillis()
-    }
-
-    /** Step 3: Wait until "sync complete" or timeout (~20s). */
-    private fun handleWaitSyncComplete(texts: List<String>) {
-        val elapsed = System.currentTimeMillis() - syncWaitStart
-        val syncDone = texts.any {
-            it.contains("sync complete", ignoreCase = true) ||
-            it.contains("synced", ignoreCase = true) ||
-            it.contains("sync completed", ignoreCase = true) ||
-            it.contains("data synchronized", ignoreCase = true)
-        }
-
-        if (syncDone || elapsed > SYNC_TIMEOUT_MS) {
-            Log.d(TAG, "Sync complete detected=$syncDone, elapsed=${elapsed}ms")
-            currentStepDescription = "Sync complete, opening Sleep…"
-            step = Step.CLICK_SLEEP
-            retryCount = 0
-            handler.postDelayed({ processStep() }, 800)
-        } else {
-            // Keep waiting — re-check after delay
-            currentStepDescription = "Waiting for sync to complete…"
-            handler.postDelayed({ isProcessing = false; refreshAndReprocess() }, 3000)
-        }
-    }
-
-    /** Step 4: Click the "Sleep" card on the home screen. */
-    private fun handleClickSleep(root: AccessibilityNodeInfo) {
-        currentStepDescription = "Opening Sleep details…"
-        Log.d(TAG, "Looking for Sleep card")
-
-        val clicked = findAndClickNode(root, "Sleep")
-        if (clicked) {
-            Log.d(TAG, "Clicked Sleep card")
-            step = Step.WAIT_SLEEP_LOAD
-            loadWaitStart = System.currentTimeMillis()
-            retryCount = 0
-        } else {
-            retryCount++
-            if (retryCount < MAX_RETRIES) {
-                Log.w(TAG, "Sleep card not found, retry $retryCount")
-                // Try scrolling to find it
-                findScrollableNode(root)?.let {
-                    it.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                    it.recycle()
-                }
-                handler.postDelayed({ isProcessing = false; refreshAndReprocess() }, 1500)
-            } else {
-                Log.e(TAG, "Could not find Sleep card after $MAX_RETRIES retries")
-                finishSync()
-            }
-        }
-    }
-
-    /** Step 5: Wait for sleep detail to fully load (~15–20s). */
-    private fun handleWaitSleepLoad(texts: List<String>) {
-        val elapsed = System.currentTimeMillis() - loadWaitStart
-        // Detect loaded state: look for sleep-related keywords
-        val loaded = texts.any {
-            it.contains("total sleep", ignoreCase = true) ||
-            it.contains("sleep duration", ignoreCase = true) ||
-            it.contains("sleep score", ignoreCase = true) ||
-            it.contains("sleeping heart rate", ignoreCase = true) ||
-            it.contains("hr", ignoreCase = true) && it.contains("min", ignoreCase = true)
-        }
-
-        if (loaded || elapsed > LOAD_TIMEOUT_MS) {
-            Log.d(TAG, "Sleep detail loaded (detected=$loaded, elapsed=${elapsed}ms)")
-            currentStepDescription = "Reading sleep data…"
-            step = Step.COLLECT_INITIAL
-            handler.postDelayed({ processStep() }, 1000)
-        } else {
-            currentStepDescription = "Waiting for sleep data to load…"
-            handler.postDelayed({ isProcessing = false; refreshAndReprocess() }, 3000)
-        }
-    }
-
-    /** Step 6: Collect the initially visible sleep data. */
-    private fun handleCollectInitial(root: AccessibilityNodeInfo, texts: List<String>) {
-        currentStepDescription = "Collecting sleep overview…"
-        collectedSleepTexts.addAll(texts)
-        Log.d(TAG, "Collected initial sleep texts (${texts.size} nodes)")
-        step = Step.SWIPE_RIGHT_CARDS
-        swipeCount = 0
-        handler.postDelayed({ processStep() }, 500)
-    }
-
-    /** Step 7: Swipe right on the stat-card area to reveal more cards. */
-    private fun handleSwipeRightCards(root: AccessibilityNodeInfo, texts: List<String>) {
-        if (swipeCount >= MAX_CARD_SWIPES) {
-            Log.d(TAG, "Done swiping stat cards ($swipeCount swipes)")
-            step = Step.SCROLL_TO_ANALYSIS
-            handler.postDelayed({ processStep() }, 500)
             return
         }
 
-        currentStepDescription = "Sliding stat cards (${swipeCount + 1}/$MAX_CARD_SWIPES)…"
-        collectedSleepTexts.addAll(texts)
+        val bounds = screenBounds(root)
+        val texts = capture(root)
+        val timedOut = now() > stepDeadline
 
-        // Perform a horizontal swipe-right gesture on the card area
-        performSwipeRight()
-        swipeCount++
-        Log.d(TAG, "Swipe right #$swipeCount performed")
-        // Wait for the card to settle, then processStep will collect
-        handler.postDelayed({ isProcessing = false; refreshAndReprocess() }, 2000)
+        when (step) {
+            Step.WAIT_APP -> waitForApp(root, timedOut)
+            Step.SYNC_GESTURE -> pullToSync(bounds)
+            Step.SYNC_WAIT -> waitForSync(bounds, texts, timedOut)
+            Step.HOME_COLLECT -> collectHome(root, texts, timedOut)
+            Step.OPEN_SLEEP -> openSleep(root, bounds, timedOut)
+            Step.SLEEP_LOAD -> waitForSleep(texts, timedOut)
+            Step.SLEEP_CARDS -> readSleepCards(root, bounds, texts, timedOut)
+            Step.SLEEP_SCROLL -> readSleepAnalysis(root, texts, timedOut)
+            Step.FINISH, Step.IDLE -> Unit
+        }
     }
 
-    /** Step 8: Scroll down to find "More analysis". */
-    private fun handleScrollToAnalysis(root: AccessibilityNodeInfo, texts: List<String>) {
-        currentStepDescription = "Looking for More analysis…"
-        collectedSleepTexts.addAll(texts)
+    /** Vivo Health has to be the app on screen before anything else means anything. */
+    private fun waitForApp(root: AccessibilityNodeInfo, timedOut: Boolean) {
+        if (isVivoHealth(root.packageName?.toString())) {
+            goTo(Step.SYNC_GESTURE, 5_000L)
+            return
+        }
+        if (timedOut) abortRun("Vivo Health did not open")
+    }
 
-        val foundMoreAnalysis = texts.any {
-            it.contains("more analysis", ignoreCase = true) ||
-            it.contains("view more", ignoreCase = true)
+    /**
+     * The sync is triggered by dragging the list at the top of the Health tab.
+     * Pull-to-refresh (downward) is the mechanic in this app family, so it goes
+     * first; if no "Syncing" or "Sync complete" appears, [waitForSync] retries
+     * with an upward drag, so either gesture direction gets us there.
+     */
+    private fun pullToSync(bounds: Rect) {
+        val midX = bounds.centerX().toFloat()
+        if (!pulledDown) {
+            pulledDown = true
+            drag(midX, bounds.top + bounds.height() * 0.30f, midX, bounds.top + bounds.height() * 0.78f)
+        } else {
+            pulledUp = true
+            drag(midX, bounds.top + bounds.height() * 0.78f, midX, bounds.top + bounds.height() * 0.30f)
+        }
+        goTo(Step.SYNC_WAIT, SYNC_WAIT_MS)
+        pause(2_000L)
+    }
+
+    private fun waitForSync(bounds: Rect, texts: List<String>, timedOut: Boolean) {
+        val blob = texts.joinToString(" | ").lowercase()
+
+        if (!sawSyncing && (blob.contains("syncing") || blob.contains("synchronizing") ||
+                    blob.contains("synchronising"))
+        ) {
+            sawSyncing = true
+            publish("Watch is syncing…")
+            Log.d(TAG, "sync in progress")
         }
 
-        if (foundMoreAnalysis) {
-            Log.d(TAG, "Found More analysis section")
-            step = Step.CLICK_MORE_ANALYSIS
-            handler.postDelayed({ processStep() }, 500)
-        } else {
-            // Scroll down to reveal it
-            val scrolled = findScrollableNode(root)?.let {
-                it.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
-                it.recycle()
-                true
-            } ?: false
+        val done = blob.contains("sync complete") || blob.contains("sync completed") ||
+                blob.contains("synced") || blob.contains("data synchronized") ||
+                blob.contains("up to date")
 
-            retryCount++
-            if (!scrolled || retryCount > MAX_RETRIES) {
-                Log.w(TAG, "Could not find More analysis, collecting what we have")
-                step = Step.COLLECT_ANALYSIS
-                handler.postDelayed({ processStep() }, 500)
+        if (done) {
+            Log.d(TAG, "sync complete")
+            beginHomeCollect("Sync complete")
+            return
+        }
+
+        // Nothing happened — the drag probably went the wrong way. Try the other.
+        if (!sawSyncing && !pulledUp && now() - stepStarted > SYNC_PROBE_MS) {
+            Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – trying the opposite drag")
+            goTo(Step.SYNC_GESTURE, 5_000L, "Retrying sync gesture…")
+            return
+        }
+
+        if (timedOut) {
+            // Whatever is on screen is what the watch last delivered; read it.
+            Log.w(TAG, "sync wait timed out (sawSyncing=$sawSyncing) – reading anyway")
+            beginHomeCollect("Sync timed out, reading cached data")
+        }
+    }
+
+    private fun beginHomeCollect(detail: String) {
+        topScrollsLeft = MAX_TOP_SCROLLS
+        goTo(Step.HOME_COLLECT, HOME_COLLECT_MS, detail)
+        pause(1_200L)
+    }
+
+    /**
+     * The rings sit at the very top of the Health tab, which the sync drag may
+     * have scrolled away from — so scroll back up before reading.
+     */
+    private fun collectHome(root: AccessibilityNodeInfo, texts: List<String>, timedOut: Boolean) {
+        if (topScrollsLeft > 0) {
+            topScrollsLeft--
+            if (scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
+                pause(700L)
+                return
+            }
+            topScrollsLeft = 0  // already at the top
+        }
+
+        addCapture(homeCaptures, texts)
+        val activity = parser.parseHomeActivity(homeCaptures)
+
+        // Steps is the ring that is always populated; the others can legitimately
+        // read 0 / goal, which still parses, so one full capture is enough.
+        if (activity.steps != null || timedOut) {
+            Log.d(TAG, "home activity: $activity")
+            sleepOpenAttempts = 0
+            goTo(Step.OPEN_SLEEP, OPEN_SLEEP_MS)
+        }
+    }
+
+    /** Taps the Sleep card, avoiding the "Sleep" entry in the bottom nav bar. */
+    private fun openSleep(root: AccessibilityNodeInfo, bounds: Rect, timedOut: Boolean) {
+        if (clickSleepCard(root, bounds)) {
+            sleepLoadAttempts++
+            goTo(Step.SLEEP_LOAD, SLEEP_LOAD_MS)
+            pause(3_000L)
+            return
+        }
+
+        sleepOpenAttempts++
+        if (timedOut || sleepOpenAttempts > 4) {
+            Log.e(TAG, "Sleep card never found")
+            finish()
+            return
+        }
+        // It may be below the fold; nudge the list and look again.
+        scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        pause(1_200L)
+    }
+
+    private fun waitForSleep(texts: List<String>, timedOut: Boolean) {
+        val blob = texts.joinToString(" | ").lowercase()
+        val loading = blob.contains("loading") || blob.contains("please wait")
+        val ready = !loading && (
+                blob.contains("total sleep duration") ||
+                        blob.contains("compared to last") ||
+                        blob.contains("sleep heart rate") ||
+                        blob.contains("more analysis")
+                )
+
+        if (ready) {
+            addCapture(sleepCaptures, texts)
+            cardSwipes = 0
+            lastCardSignature = null
+            goTo(Step.SLEEP_CARDS, SLEEP_CARDS_MS)
+            return
+        }
+
+        if (timedOut) {
+            if (sleepLoadAttempts < 2) {
+                Log.w(TAG, "sleep detail never rendered – trying the card again")
+                sleepOpenAttempts = 0
+                goTo(Step.OPEN_SLEEP, OPEN_SLEEP_MS, "Retrying Sleep…")
             } else {
-                Log.d(TAG, "Scrolled down, retry $retryCount")
-                handler.postDelayed({ isProcessing = false; refreshAndReprocess() }, 1500)
+                Log.e(TAG, "sleep detail never rendered")
+                finish()
             }
         }
     }
 
-    /** Step 9: Click "More analysis" if clickable. */
-    private fun handleClickMoreAnalysis(root: AccessibilityNodeInfo, texts: List<String>) {
-        currentStepDescription = "Opening More analysis…"
+    /**
+     * The vitals live in a horizontal carousel — total duration, heart rate,
+     * respiratory rate, SpO₂, HRV — one card at a time. Swipe until all four
+     * ranges have parsed, the carousel stops changing, or we run out of swipes.
+     */
+    private fun readSleepCards(
+        root: AccessibilityNodeInfo,
+        bounds: Rect,
+        texts: List<String>,
+        timedOut: Boolean,
+    ) {
+        addCapture(sleepCaptures, texts)
 
-        val clicked = findAndClickNode(root, "More analysis")
-            || findAndClickNode(root, "more analysis")
-            || findAndClickNode(root, "View more")
+        val sleep = parser.parseSleepDetail(sleepCaptures)
+        val haveAll = sleep.heartRate != null && sleep.respiratoryRate != null &&
+                sleep.spo2 != null && sleep.hrv != null
 
-        if (clicked) {
-            Log.d(TAG, "Clicked More analysis")
-            // Wait for expanded view to load
-            handler.postDelayed({
-                step = Step.COLLECT_ANALYSIS
-                isProcessing = false
-                refreshAndReprocess()
-            }, 2500)
-        } else {
-            // May already be visible / not a separate button
-            Log.d(TAG, "More analysis not clickable, collecting visible data")
-            step = Step.COLLECT_ANALYSIS
-            handler.postDelayed({ processStep() }, 500)
+        val signature = texts.joinToString("|")
+        val stalled = signature == lastCardSignature
+        lastCardSignature = signature
+
+        if (haveAll || cardSwipes >= MAX_CARD_SWIPES || timedOut || (stalled && cardSwipes > 0)) {
+            Log.d(
+                TAG,
+                "carousel done after $cardSwipes swipes " +
+                        "(hr=${sleep.heartRate} rr=${sleep.respiratoryRate} " +
+                        "spo2=${sleep.spo2} hrv=${sleep.hrv})"
+            )
+            analysisScrolls = 0
+            expandedAnalysis = false
+            lastScrollSignature = null
+            unchangedScrolls = 0
+            goTo(Step.SLEEP_SCROLL, SLEEP_SCROLL_MS)
+            return
         }
+
+        val y = carouselY(root, bounds)
+        drag(
+            bounds.left + bounds.width() * 0.80f, y,
+            bounds.left + bounds.width() * 0.20f, y,
+            durationMs = 320L,
+        )
+        cardSwipes++
+        publish("Sleep vitals card ${cardSwipes + 1}")
+        pause(1_600L)
     }
 
-    /** Step 10: Collect analysis data and finish. */
-    private fun handleCollectAnalysis(texts: List<String>) {
-        currentStepDescription = "Reading sleep analysis…"
-        collectedSleepTexts.addAll(texts)
-        Log.d(TAG, "Collected analysis texts (${texts.size} nodes)")
-        finishSync()
+    /**
+     * Everything below the carousel: the score block, then "More analysis" which
+     * expands the stage donut, awakenings, continuity and average blood oxygen.
+     */
+    private fun readSleepAnalysis(
+        root: AccessibilityNodeInfo,
+        texts: List<String>,
+        timedOut: Boolean,
+    ) {
+        addCapture(sleepCaptures, texts)
+
+        if (!expandedAnalysis && texts.any { it.contains("more analysis", true) }) {
+            if (clickByText(root, "More analysis")) {
+                expandedAnalysis = true
+                publish("Expanding More analysis…")
+                Log.d(TAG, "tapped More analysis")
+                pause(3_000L)
+                return
+            }
+            // Not a button on this build — the section is already inline.
+            expandedAnalysis = true
+        }
+
+        val signature = texts.joinToString("|")
+        if (signature == lastScrollSignature) unchangedScrolls++ else unchangedScrolls = 0
+        lastScrollSignature = signature
+
+        val bottom = unchangedScrolls >= 2
+        if (bottom || analysisScrolls >= MAX_ANALYSIS_SCROLLS || timedOut) {
+            Log.d(TAG, "analysis read after $analysisScrolls scrolls (bottom=$bottom)")
+            finish()
+            return
+        }
+
+        if (!scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+            unchangedScrolls++
+        }
+        analysisScrolls++
+        pause(1_300L)
     }
 
     // ─────────────────────────────────────────────────────
-    //  Finish & deliver
+    //  Finish
     // ─────────────────────────────────────────────────────
 
-    private fun finishSync() {
-        currentStepDescription = "Parsing sleep data…"
-        Log.d(TAG, "Finishing sync. Total collected: ${collectedSleepTexts.size} texts")
-        collectedSleepTexts.forEachIndexed { i, t -> Log.d(TAG, "  all[$i] \"$t\"") }
+    private fun finish() {
+        step = Step.FINISH
+        publish("Parsing…")
+        handler.removeCallbacks(ticker)
 
-        val parsed = parser.parseSleepScreen(collectedSleepTexts)
-        Log.d(TAG, "Parsed sleep data: $parsed")
+        val activity = if (homeCaptures.isEmpty()) null else parser.parseHomeActivity(homeCaptures)
+        val sleep = if (sleepCaptures.isEmpty()) null else parser.parseSleepDetail(sleepCaptures)
 
-        currentStepDescription = "Done"
-        step = Step.DONE
-        syncCallback?.invoke(parsed)
-        stopSync()
+        if (Log.isLoggable(TAG, Log.DEBUG)) {
+            homeCaptures.forEachIndexed { i, c -> Log.d(TAG, "home[$i] = $c") }
+            sleepCaptures.forEachIndexed { i, c -> Log.d(TAG, "sleep[$i] = $c") }
+        }
+        Log.d(TAG, "activity = $activity")
+        Log.d(TAG, "sleep = $sleep")
 
-        // Navigate back to our app
+        val parsed = ParsedHealthData(
+            activity = activity?.takeIf { it.hasData() },
+            sleep = sleep?.takeIf { it.hasData() },
+        )
+
+        step = Step.IDLE
+        _progress.value = SyncProgress(
+            active = false,
+            step = if (parsed.hasAnyData()) "Done" else "No data found",
+            percent = 100,
+        )
+
+        val callback = syncCallback
+        syncCallback = null
+        callback?.invoke(parsed)
+
+        returnToApp()
+    }
+
+    /** Bring our own UI back so the result is visible without the user hunting for it. */
+    private fun returnToApp() {
         performGlobalAction(GLOBAL_ACTION_BACK)
+        handler.postDelayed({
+            try {
+                startActivity(
+                    Intent(this, MainActivity::class.java).addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                                Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    )
+                )
+            } catch (t: Throwable) {
+                // Background activity starts can be refused; the back press above
+                // is the fallback and the result is already delivered either way.
+                Log.w(TAG, "could not return to the app", t)
+            }
+        }, 600L)
     }
 
     // ─────────────────────────────────────────────────────
     //  Gestures
     // ─────────────────────────────────────────────────────
 
-    /** Swipe down from top ~30% to ~70% of screen (pull-to-refresh). */
-    private fun performSwipeDown() {
-        val displayMetrics = resources.displayMetrics
-        val screenW = displayMetrics.widthPixels.toFloat()
-        val screenH = displayMetrics.heightPixels.toFloat()
-
+    /**
+     * A slow drag with a brief hold at the end — pull-to-refresh implementations
+     * measure the drag distance over time and ignore a flick.
+     */
+    private fun drag(
+        fromX: Float,
+        fromY: Float,
+        toX: Float,
+        toY: Float,
+        durationMs: Long = 800L,
+        holdMs: Long = 200L,
+    ) {
         val path = Path().apply {
-            moveTo(screenW / 2f, screenH * 0.25f)
-            lineTo(screenW / 2f, screenH * 0.75f)
+            moveTo(fromX, fromY)
+            lineTo(toX, toY)
         }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 600))
-            .build()
-        dispatchGesture(gesture, null, null)
-        Log.d(TAG, "Swipe-down gesture dispatched")
+        val builder = GestureDescription.Builder()
+        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs, holdMs > 0)
+        builder.addStroke(stroke)
+        if (holdMs > 0) {
+            // A 1px contour: a zero-length path is rejected by StrokeDescription.
+            val hold = Path().apply {
+                moveTo(toX, toY)
+                lineTo(toX, toY + 1f)
+            }
+            builder.addStroke(stroke.continueStroke(hold, durationMs, holdMs, false))
+        }
+        val dispatched = dispatchGesture(builder.build(), null, null)
+        if (!dispatched) {
+            Log.e(
+                TAG,
+                "dispatchGesture refused – canPerformGestures is missing from " +
+                        "accessibility_service_config.xml"
+            )
+        }
     }
 
-    /** Swipe right on the stat-card area (middle of screen). */
-    private fun performSwipeRight() {
-        val displayMetrics = resources.displayMetrics
-        val screenW = displayMetrics.widthPixels.toFloat()
-        val screenH = displayMetrics.heightPixels.toFloat()
-
-        val y = screenH * 0.55f  // roughly where stat cards sit
-        val path = Path().apply {
-            moveTo(screenW * 0.75f, y)
-            lineTo(screenW * 0.25f, y)
+    /** Vertical centre of the vitals carousel, taken from the card's own bounds. */
+    private fun carouselY(root: AccessibilityNodeInfo, bounds: Rect): Float {
+        val anchor = findNode(root) { node ->
+            val text = nodeText(node)?.lowercase() ?: return@findNode false
+            text.contains("sleep heart rate") || text.contains("total sleep duration") ||
+                    text.contains("respiratory") || text.contains("spo2") ||
+                    text.contains("spo₂") || text.contains("hrv")
         }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 400))
-            .build()
-        dispatchGesture(gesture, null, null)
-        Log.d(TAG, "Swipe-right gesture dispatched")
+        val rect = Rect()
+        anchor?.getBoundsInScreen(rect)
+        if (rect.height() > 0 && rect.centerY() > bounds.top) return rect.centerY().toFloat()
+        return bounds.top + bounds.height() * 0.45f
     }
 
     // ─────────────────────────────────────────────────────
     //  Node helpers
     // ─────────────────────────────────────────────────────
 
-    private fun refreshAndReprocess() {
-        // Trigger a fresh accessibility event by reading the root again
-        handler.postDelayed({ processStep() }, 500)
+    private fun screenBounds(root: AccessibilityNodeInfo?): Rect {
+        val rect = Rect()
+        root?.getBoundsInScreen(rect)
+        if (rect.width() > 0 && rect.height() > 0) return rect
+        val dm = resources.displayMetrics
+        return Rect(0, 0, dm.widthPixels, dm.heightPixels)
     }
 
-    private fun collectAllText(node: AccessibilityNodeInfo?, texts: MutableList<String>) {
-        node ?: return
+    private fun isVivoHealth(packageName: String?): Boolean {
+        val name = packageName ?: return false
+        return VIVO_HEALTH_PACKAGES.any { name.startsWith(it, ignoreCase = true) } ||
+                (name.contains("vivo", true) && name.contains("health", true))
+    }
+
+    private fun nodeText(node: AccessibilityNodeInfo): String? =
+        node.text?.toString()?.takeIf { it.isNotBlank() }
+            ?: node.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+
+    /**
+     * Every text node in tree order. Order matters: the parser reads values by
+     * their distance from a label, so the sequence must not be reshuffled or
+     * de-duplicated across the screen.
+     */
+    private fun capture(root: AccessibilityNodeInfo): List<String> {
+        val out = ArrayList<String>(64)
+        walk(root, 0, out)
+        return out
+    }
+
+    private fun walk(node: AccessibilityNodeInfo?, depth: Int, out: MutableList<String>) {
+        if (node == null || depth > MAX_DEPTH || out.size >= MAX_NODES) return
         try {
-            node.text?.toString()?.let { text ->
-                if (text.isNotBlank()) texts.add(text.trim())
-            }
-            node.contentDescription?.toString()?.let { desc ->
-                if (desc.isNotBlank() && !texts.contains(desc.trim())) {
-                    texts.add(desc.trim())
-                }
-            }
+            val text = node.text?.toString()?.trim()
+            if (!text.isNullOrEmpty()) out.add(text)
+
+            val desc = node.contentDescription?.toString()?.trim()
+            if (!desc.isNullOrEmpty() && desc != text) out.add(desc)
+
             for (i in 0 until node.childCount) {
-                val child = node.getChild(i) ?: continue
-                collectAllText(child, texts)
-                child.recycle()
+                walk(node.getChild(i), depth + 1, out)
+                if (out.size >= MAX_NODES) return
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error collecting text", e)
+        } catch (t: Throwable) {
+            Log.w(TAG, "walk failed at depth $depth", t)
         }
     }
 
-    private fun findAndClickNode(node: AccessibilityNodeInfo?, targetText: String): Boolean {
-        node ?: return false
-        try {
-            val nodes = node.findAccessibilityNodeInfosByText(targetText)
-            if (nodes != null && nodes.isNotEmpty()) {
-                for (n in nodes) {
-                    if (n.isClickable) {
-                        n.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        n.recycle()
-                        return true
-                    }
-                    var parent = n.parent
-                    var depth = 0
-                    while (parent != null && depth < 6) {
-                        if (parent.isClickable) {
-                            parent.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                            parent.recycle()
-                            n.recycle()
-                            return true
-                        }
-                        val old = parent
-                        parent = parent.parent
-                        old.recycle()
-                        depth++
-                    }
-                    parent?.recycle()
-                    n.recycle()
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error finding/clicking: $targetText", e)
-        }
-        return false
-    }
-
-    private fun findScrollableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        node ?: return null
-        if (node.isScrollable) return node
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i)
-            val result = findScrollableNode(child)
-            if (result != null) return result
-            child?.recycle()
+    private fun findNode(
+        root: AccessibilityNodeInfo?,
+        depth: Int = 0,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+    ): AccessibilityNodeInfo? {
+        if (root == null || depth > MAX_DEPTH) return null
+        if (predicate(root)) return root
+        for (i in 0 until root.childCount) {
+            findNode(root.getChild(i), depth + 1, predicate)?.let { return it }
         }
         return null
     }
 
-    // ─────────────────────────────────────────────────────
-    //  Lifecycle
-    // ─────────────────────────────────────────────────────
-
-    override fun onInterrupt() {
-        Log.w(TAG, "Accessibility Service interrupted")
-        if (isSyncing) {
-            stopSync()
-            syncCallback?.invoke(ParsedHealthData())
+    private fun collectNodes(
+        root: AccessibilityNodeInfo?,
+        depth: Int,
+        out: MutableList<AccessibilityNodeInfo>,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+    ) {
+        if (root == null || depth > MAX_DEPTH || out.size >= 32) return
+        if (predicate(root)) out.add(root)
+        for (i in 0 until root.childCount) {
+            collectNodes(root.getChild(i), depth + 1, out, predicate)
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        instance = null
-        stopSync()
-        handler.removeCallbacksAndMessages(null)
-        Log.d(TAG, "Accessibility Service destroyed")
+    /**
+     * The home screen has three things reading "Sleep": the card we want, the
+     * bottom navigation tab, and the "Sleep heart rate" label. Prefer an exact
+     * match, ignore anything sitting in the bottom nav strip.
+     */
+    private fun clickSleepCard(root: AccessibilityNodeInfo, bounds: Rect): Boolean {
+        val navTop = bounds.top + bounds.height() * 0.88f
+        val candidates = mutableListOf<AccessibilityNodeInfo>()
+        collectNodes(root, 0, candidates) { node ->
+            val text = nodeText(node)?.lowercase() ?: return@collectNodes false
+            if (!text.startsWith("sleep")) return@collectNodes false
+            val rect = Rect().also { node.getBoundsInScreen(it) }
+            rect.height() > 0 && rect.top < navTop
+        }
+
+        val ordered = candidates.sortedBy { node ->
+            when (nodeText(node)?.trim()?.lowercase()) {
+                "sleep" -> 0
+                else -> 1
+            }
+        }
+        for (node in ordered) {
+            if (clickSelfOrAncestor(node)) {
+                Log.d(TAG, "clicked Sleep entry \"${nodeText(node)}\"")
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun clickByText(root: AccessibilityNodeInfo, text: String): Boolean {
+        val matches = root.findAccessibilityNodeInfosByText(text) ?: return false
+        for (node in matches) {
+            if (clickSelfOrAncestor(node)) return true
+        }
+        return false
+    }
+
+    private fun clickSelfOrAncestor(node: AccessibilityNodeInfo?): Boolean {
+        var current = node
+        var depth = 0
+        while (current != null && depth < 8) {
+            if (current.isClickable && current.isEnabled) {
+                return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            }
+            current = current.parent
+            depth++
+        }
+        return false
+    }
+
+    /** Scrolls the deepest scrollable container, which is the content list. */
+    private fun scroll(root: AccessibilityNodeInfo, action: Int): Boolean {
+        val scrollables = mutableListOf<AccessibilityNodeInfo>()
+        collectNodes(root, 0, scrollables) { it.isScrollable }
+        for (node in scrollables.asReversed()) {
+            if (node.performAction(action)) return true
+        }
+        return false
+    }
+
+    private fun addCapture(target: MutableList<List<String>>, texts: List<String>) {
+        if (texts.isEmpty()) return
+        if (target.isNotEmpty() && target.last() == texts) return
+        target.add(texts)
     }
 }
