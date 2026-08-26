@@ -62,8 +62,9 @@ class HealthConnectManager(private val context: Context) {
         val client = healthConnectClient ?: return false
         return try {
             val granted = client.permissionController.getGrantedPermissions()
-            getPermissions().all { it in granted }
+            granted.any { it in getPermissions() }
         } catch (e: Exception) {
+            Log.e(TAG, "Error getting granted permissions", e)
             false
         }
     }

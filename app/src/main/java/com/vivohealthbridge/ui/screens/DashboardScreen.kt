@@ -120,7 +120,7 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(56.dp),
-                            enabled = uiState.isAccessibilityEnabled && uiState.healthConnectPermissionsGranted
+                            enabled = uiState.isAccessibilityEnabled
                         ) {
                             Icon(Icons.Filled.Sync, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))

@@ -74,7 +74,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onPermissionsResult(granted: Set<String>) {
         _uiState.value = _uiState.value.copy(
-            healthConnectPermissionsGranted = granted.containsAll(healthConnectManager.getPermissions())
+            healthConnectPermissionsGranted = granted.isNotEmpty()
         )
     }
 
