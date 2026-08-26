@@ -165,11 +165,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun logSyncRecords(data: ParsedHealthData, status: SyncStatus) {
         val statusStr = status.name
+        // Sleep is the primary metric
+        if (data.sleepTotalMinutes != null) {
+            val parts = mutableListOf("${data.sleepTotalMinutes}min")
+            data.sleepScore?.let { parts.add("score:$it") }
+            data.deepSleepMinutes?.let { parts.add("deep:${it}m") }
+            data.lightSleepMinutes?.let { parts.add("light:${it}m") }
+            data.remSleepMinutes?.let { parts.add("rem:${it}m") }
+            data.numberOfAwakenings?.let { parts.add("awake:$it×") }
+            syncRepository.logSync(HealthMetricType.SLEEP.name, parts.joinToString(" "), statusStr)
+        }
+        if (data.sleepHrvMin != null && data.sleepHrvMax != null) {
+            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "Sleep HRV ${data.sleepHrvMin}-${data.sleepHrvMax}ms", statusStr)
+        }
+        if (data.averageSleepSpo2 != null) {
+            syncRepository.logSync(HealthMetricType.SPO2.name, "Sleep SpO2 avg ${data.averageSleepSpo2}%", statusStr)
+        }
+        // Non-sleep metrics
         if (data.heartRateBpm != null) {
             syncRepository.logSync(HealthMetricType.HEART_RATE.name, "${data.heartRateBpm} bpm", statusStr)
-        }
-        if (data.sleepTotalMinutes != null) {
-            syncRepository.logSync(HealthMetricType.SLEEP.name, "${data.sleepTotalMinutes} min", statusStr)
         }
         if (data.oxygenSaturation != null) {
             syncRepository.logSync(HealthMetricType.SPO2.name, "${data.oxygenSaturation}%", statusStr)

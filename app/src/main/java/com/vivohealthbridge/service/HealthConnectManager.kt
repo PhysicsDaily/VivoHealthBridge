@@ -74,10 +74,26 @@ class HealthConnectManager(private val context: Context) {
         val errors = mutableListOf<String>()
 
         try {
+            // ── Sleep session (core) ────────────────────────
             if (data.sleepTotalMinutes != null && data.sleepStartTime != null && data.sleepEndTime != null) {
                 writeSleepSession(data)
                 count++
             }
+
+            // ── Sleep HRV (mid-point of range, RMSSD) ──────
+            if (data.sleepHrvMin != null && data.sleepHrvMax != null) {
+                val midHrv = (data.sleepHrvMin + data.sleepHrvMax) / 2.0
+                writeSleepHrv(midHrv)
+                count++
+            }
+
+            // ── Sleep SpO2 (average during sleep) ──────────
+            if (data.averageSleepSpo2 != null) {
+                writeOxygenSaturation(data.averageSleepSpo2, Instant.now())
+                count++
+            }
+
+            // ── Other metrics (kept for later phases) ──────
             if (data.heartRateBpm != null) {
                 writeHeartRate(data.heartRateBpm, Instant.now())
                 count++
@@ -168,17 +184,39 @@ class HealthConnectManager(private val context: Context) {
             cursor = end
         }
 
+        // Build title with score if available
+        val title = buildString {
+            append("Vivo Sleep")
+            data.sleepScore?.let { append(" (Score: $it)") }
+        }
+
         val record = SleepSessionRecord(
             startTime = sleepStartInstant,
             startZoneOffset = zoneOffset,
             endTime = sleepEndInstant,
             endZoneOffset = zoneOffset,
-            title = "Vivo Watch Sleep",
+            title = title,
             stages = stages,
         )
 
         client.insertRecords(listOf(record))
-        Log.d(TAG, "Sleep session written: ${data.sleepTotalMinutes}min with ${stages.size} stages")
+        Log.d(TAG, "Sleep session written: ${data.sleepTotalMinutes}min, " +
+                "${stages.size} stages, score=${data.sleepScore}")
+    }
+
+    /** Write sleep HRV as RMSSD record (mid-point of the reported range). */
+    suspend fun writeSleepHrv(rmssdMs: Double) {
+        val client = healthConnectClient ?: throw Exception("Health Connect not available")
+        val now = Instant.now()
+        val offset = ZoneId.systemDefault().rules.getOffset(now)
+
+        val record = HeartRateVariabilityRmssdRecord(
+            time = now,
+            zoneOffset = offset,
+            heartRateVariabilityMillis = rmssdMs,
+        )
+        client.insertRecords(listOf(record))
+        Log.d(TAG, "Sleep HRV written: ${rmssdMs}ms RMSSD")
     }
 
     suspend fun writeHeartRate(bpm: Int, timestamp: Instant) {

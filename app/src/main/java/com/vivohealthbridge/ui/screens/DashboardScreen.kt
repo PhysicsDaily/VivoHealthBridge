@@ -114,6 +114,12 @@ fun DashboardScreen(
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text("Syncing from Vivo Health...", style = MaterialTheme.typography.bodyLarge)
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            com.vivohealthbridge.service.VivoHealthAccessibilityService.currentStepDescription,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     } else {
                         Button(
                             onClick = { viewModel.startAutoSync(context) },
@@ -158,6 +164,111 @@ fun DashboardScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
+                    // ── Sleep card (primary) ──────────────────
+                    data.sleepTotalMinutes?.let { sleep ->
+                        item {
+                            MetricCard(
+                                emoji = "😴",
+                                title = "Sleep",
+                                value = "${sleep / 60}h ${sleep % 60}m",
+                                subtitle = buildString {
+                                    data.sleepScore?.let { append("Score: $it  ") }
+                                    data.sleepStartTime?.let { append("$it") }
+                                    data.sleepEndTime?.let { append("–$it") }
+                                }.ifBlank { null }
+                            )
+                        }
+                    }
+
+                    // ── Sleep stages breakdown ────────────────
+                    if (data.deepSleepMinutes != null || data.lightSleepMinutes != null || data.remSleepMinutes != null) {
+                        item {
+                            MetricCard(
+                                emoji = "📊",
+                                title = "Sleep Stages",
+                                value = listOfNotNull(
+                                    data.deepSleepMinutes?.let { "Deep ${it / 60}h${it % 60}m" },
+                                    data.lightSleepMinutes?.let { "Light ${it / 60}h${it % 60}m" },
+                                    data.remSleepMinutes?.let { "REM ${it / 60}h${it % 60}m" }
+                                ).joinToString("\n"),
+                                subtitle = listOfNotNull(
+                                    data.deepSleepPct?.let { "D:$it%" },
+                                    data.lightSleepPct?.let { "L:$it%" },
+                                    data.remSleepPct?.let { "R:$it%" }
+                                ).joinToString("  ").ifBlank { null }
+                            )
+                        }
+                    }
+
+                    // ── Sleeping heart rate range ─────────────
+                    if (data.sleepHeartRateMin != null && data.sleepHeartRateMax != null) {
+                        item {
+                            MetricCard(
+                                emoji = "💓",
+                                title = "Sleep HR",
+                                value = "${data.sleepHeartRateMin}–${data.sleepHeartRateMax} bpm"
+                            )
+                        }
+                    }
+
+                    // ── Sleep respiratory rate ────────────────
+                    if (data.sleepRespiratoryRateMin != null && data.sleepRespiratoryRateMax != null) {
+                        item {
+                            MetricCard(
+                                emoji = "🫁",
+                                title = "Resp Rate",
+                                value = "${data.sleepRespiratoryRateMin}–${data.sleepRespiratoryRateMax}/min"
+                            )
+                        }
+                    }
+
+                    // ── Sleep SpO2 range ─────────────────────
+                    if (data.sleepSpo2Min != null && data.sleepSpo2Max != null) {
+                        item {
+                            MetricCard(
+                                emoji = "🩸",
+                                title = "Sleep SpO2",
+                                value = "${data.sleepSpo2Min}–${data.sleepSpo2Max}%",
+                                subtitle = data.averageSleepSpo2?.let { "Avg: $it%" }
+                            )
+                        }
+                    }
+
+                    // ── Sleep HRV ─────────────────────────────
+                    if (data.sleepHrvMin != null && data.sleepHrvMax != null) {
+                        item {
+                            MetricCard(
+                                emoji = "📈",
+                                title = "Sleep HRV",
+                                value = "${data.sleepHrvMin}–${data.sleepHrvMax} ms"
+                            )
+                        }
+                    }
+
+                    // ── Awakenings ────────────────────────────
+                    if (data.numberOfAwakenings != null) {
+                        item {
+                            MetricCard(
+                                emoji = "👁️",
+                                title = "Awakenings",
+                                value = "${data.numberOfAwakenings}×",
+                                subtitle = data.awakeMinutes?.let { "${it}min awake" }
+                            )
+                        }
+                    }
+
+                    // ── Deep sleep continuity ─────────────────
+                    data.deepSleepContinuity?.let { continuity ->
+                        item {
+                            MetricCard(
+                                emoji = "🔗",
+                                title = "DS Continuity",
+                                value = continuity
+                            )
+                        }
+                    }
+
+                    // ── Other metrics (non-sleep) ─────────────
                     data.heartRateBpm?.let { hr ->
                         item {
                             MetricCard(
@@ -165,20 +276,6 @@ fun DashboardScreen(
                                 title = "Heart Rate",
                                 value = "$hr bpm",
                                 subtitle = data.restingHeartRateBpm?.let { "Resting: $it" }
-                            )
-                        }
-                    }
-                    data.sleepTotalMinutes?.let { sleep ->
-                        item {
-                            MetricCard(
-                                emoji = "😴",
-                                title = "Sleep",
-                                value = "${sleep / 60}h ${sleep % 60}m",
-                                subtitle = listOfNotNull(
-                                    data.deepSleepMinutes?.let { "D:${it / 60}h${it % 60}m" },
-                                    data.lightSleepMinutes?.let { "L:${it / 60}h${it % 60}m" },
-                                    data.remSleepMinutes?.let { "R:${it / 60}h${it % 60}m" }
-                                ).joinToString(" ")
                             )
                         }
                     }
