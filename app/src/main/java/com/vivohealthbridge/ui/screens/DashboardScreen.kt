@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -146,6 +147,7 @@ fun DashboardScreen(
                             enabled = uiState.isAccessibilityEnabled
                         ) {
                             Icon(Icons.Filled.Sync, contentDescription = null)
+                            Icon(Icons.Filled.Refresh, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Auto-Sync from Vivo Health", fontSize = 16.sp)
                         }

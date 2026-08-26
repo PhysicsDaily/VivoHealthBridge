@@ -142,6 +142,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
     private var pulledDown = false
     private var pulledUp = false
+    private var syncAttempts = 0
     private var sawSyncing = false
     private var topScrollsLeft = 0
     private var cardSwipes = 0
@@ -209,6 +210,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         sleepCaptures.clear()
         pulledDown = false
         pulledUp = false
+        syncAttempts = 0
         sawSyncing = false
         topScrollsLeft = MAX_TOP_SCROLLS
         cardSwipes = 0
@@ -291,10 +293,12 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             Step.SYNC_GESTURE -> pullToSync(bounds)
             Step.SYNC_WAIT -> waitForSync(bounds, texts, timedOut)
             Step.HOME_COLLECT -> collectHome(root, texts, timedOut)
+            Step.HOME_COLLECT -> collectHome(root, bounds, texts, timedOut)
             Step.OPEN_SLEEP -> openSleep(root, bounds, timedOut)
             Step.SLEEP_LOAD -> waitForSleep(texts, timedOut)
             Step.SLEEP_CARDS -> readSleepCards(root, bounds, texts, timedOut)
             Step.SLEEP_SCROLL -> readSleepAnalysis(root, texts, timedOut)
+            Step.SLEEP_SCROLL -> readSleepAnalysis(root, bounds, texts, timedOut)
             Step.FINISH, Step.IDLE -> Unit
         }
     }
@@ -313,6 +317,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
      * Pull-to-refresh (downward) is the mechanic in this app family, so it goes
      * first; if no "Syncing" or "Sync complete" appears, [waitForSync] retries
      * with an upward drag, so either gesture direction gets us there.
+     * The sync is triggered by dragging the list at the top of the Health tab
+     * downward and releasing immediately (ACTION_UP) to trigger pull-to-refresh.
      */
     private fun pullToSync(bounds: Rect) {
         val midX = bounds.centerX().toFloat()
@@ -323,8 +329,14 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             pulledUp = true
             drag(midX, bounds.top + bounds.height() * 0.78f, midX, bounds.top + bounds.height() * 0.30f)
         }
+        val startY = bounds.top + bounds.height() * 0.22f
+        val endY = bounds.top + bounds.height() * 0.75f
+        syncAttempts++
+        Log.d(TAG, "pullToSync attempt $syncAttempts (from $startY to $endY, releasing immediately)")
+        drag(midX, startY, midX, endY, durationMs = 380L, holdMs = 0L)
         goTo(Step.SYNC_WAIT, SYNC_WAIT_MS)
         pause(2_000L)
+        pause(1_800L)
     }
 
     private fun waitForSync(bounds: Rect, texts: List<String>, timedOut: Boolean) {
@@ -332,6 +344,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         if (!sawSyncing && (blob.contains("syncing") || blob.contains("synchronizing") ||
                     blob.contains("synchronising"))
+                    blob.contains("synchronising") || blob.contains("refreshing") ||
+                    blob.contains("updating"))
         ) {
             sawSyncing = true
             publish("Watch is syncing…")
@@ -341,6 +355,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         val done = blob.contains("sync complete") || blob.contains("sync completed") ||
                 blob.contains("synced") || blob.contains("data synchronized") ||
                 blob.contains("up to date")
+                blob.contains("up to date") || blob.contains("updated just now")
 
         if (done) {
             Log.d(TAG, "sync complete")
@@ -351,6 +366,9 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         // Nothing happened — the drag probably went the wrong way. Try the other.
         if (!sawSyncing && !pulledUp && now() - stepStarted > SYNC_PROBE_MS) {
             Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – trying the opposite drag")
+        // If no sync indicator appeared and we haven't exhausted attempts, retry pull down
+        if (!sawSyncing && syncAttempts < 2 && now() - stepStarted > SYNC_PROBE_MS) {
+            Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – retrying pull down")
             goTo(Step.SYNC_GESTURE, 5_000L, "Retrying sync gesture…")
             return
         }
@@ -371,16 +389,25 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     /**
      * The rings sit at the very top of the Health tab, which the sync drag may
      * have scrolled away from — so scroll back up before reading.
+     * The rings sit at the very top of the Health tab. If not already at the top,
+     * scroll back up before reading.
      */
     private fun collectHome(root: AccessibilityNodeInfo, texts: List<String>, timedOut: Boolean) {
         if (topScrollsLeft > 0) {
+    private fun collectHome(root: AccessibilityNodeInfo, bounds: Rect, texts: List<String>, timedOut: Boolean) {
+        val hasSteps = texts.any { it.equals("steps", ignoreCase = true) }
+        if (!hasSteps && topScrollsLeft > 0) {
             topScrollsLeft--
             if (scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
                 pause(700L)
                 return
             }
             topScrollsLeft = 0  // already at the top
+            scrollUp(bounds)
+            pause(800L)
+            return
         }
+        topScrollsLeft = 0  // at the top or done scrolling
 
         addCapture(homeCaptures, texts)
         val activity = parser.parseHomeActivity(homeCaptures)
@@ -411,6 +438,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
         // It may be below the fold; nudge the list and look again.
         scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+        // It may be below the fold; scroll down slightly and look again
+        scrollDown(bounds)
         pause(1_200L)
     }
 
@@ -486,6 +515,10 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             bounds.left + bounds.width() * 0.20f, y,
             durationMs = 320L,
         )
+        // Keep swipe safely away from screen edges (28% margin) to prevent system back navigation
+        val fromX = bounds.left + bounds.width() * 0.72f
+        val toX = bounds.left + bounds.width() * 0.28f
+        drag(fromX, y, toX, y, durationMs = 320L, holdMs = 0L)
         cardSwipes++
         publish("Sleep vitals card ${cardSwipes + 1}")
         pause(1_600L)
@@ -497,17 +530,20 @@ class VivoHealthAccessibilityService : AccessibilityService() {
      */
     private fun readSleepAnalysis(
         root: AccessibilityNodeInfo,
+        bounds: Rect,
         texts: List<String>,
         timedOut: Boolean,
     ) {
         addCapture(sleepCaptures, texts)
 
+        // Expand "More analysis" if visible and not already expanded
         if (!expandedAnalysis && texts.any { it.contains("more analysis", true) }) {
             if (clickByText(root, "More analysis")) {
                 expandedAnalysis = true
                 publish("Expanding More analysis…")
                 Log.d(TAG, "tapped More analysis")
                 pause(3_000L)
+                pause(2_500L)
                 return
             }
             // Not a button on this build — the section is already inline.
@@ -516,11 +552,19 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         val signature = texts.joinToString("|")
         if (signature == lastScrollSignature) unchangedScrolls++ else unchangedScrolls = 0
+        if (signature == lastScrollSignature) {
+            unchangedScrolls++
+        } else {
+            unchangedScrolls = 0
+        }
         lastScrollSignature = signature
 
         val bottom = unchangedScrolls >= 2
+        // Must have scrolled down at least 2 times before checking for bottom
+        val bottom = analysisScrolls >= 2 && unchangedScrolls >= 2
         if (bottom || analysisScrolls >= MAX_ANALYSIS_SCROLLS || timedOut) {
             Log.d(TAG, "analysis read after $analysisScrolls scrolls (bottom=$bottom)")
+            Log.d(TAG, "analysis read after $analysisScrolls scrolls (bottom=$bottom, timedOut=$timedOut)")
             finish()
             return
         }
@@ -528,8 +572,11 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         if (!scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
             unchangedScrolls++
         }
+        publish("Reading sleep analysis (${analysisScrolls + 1})…")
+        scrollDown(bounds)
         analysisScrolls++
         pause(1_300L)
+        pause(1_400L)
     }
 
     // ─────────────────────────────────────────────────────
@@ -581,6 +628,13 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                                 Intent.FLAG_ACTIVITY_SINGLE_TOP or
                                 Intent.FLAG_ACTIVITY_CLEAR_TOP
                     )
+        try {
+            val intent = Intent(this, MainActivity::class.java).apply {
+                addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
                 )
             } catch (t: Throwable) {
                 // Background activity starts can be refused; the back press above
@@ -588,6 +642,12 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "could not return to the app", t)
             }
         }, 600L)
+            startActivity(intent)
+            Log.d(TAG, "returned to MainActivity directly via Intent")
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not return to the app via Intent, using back as fallback", t)
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
     }
 
     // ─────────────────────────────────────────────────────
@@ -597,6 +657,42 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     /**
      * A slow drag with a brief hold at the end — pull-to-refresh implementations
      * measure the drag distance over time and ignore a flick.
+     * Tap gesture at the specified screen coordinates.
+     */
+    private fun tap(x: Float, y: Float): Boolean {
+        val path = Path().apply {
+            moveTo(x, y)
+        }
+        val builder = GestureDescription.Builder()
+        val stroke = GestureDescription.StrokeDescription(path, 0, 100L)
+        builder.addStroke(stroke)
+        return dispatchGesture(builder.build(), null, null)
+    }
+
+    /**
+     * Scrolls the screen down to reveal content below.
+     * Uses a physical touch drag upward along the screen center.
+     */
+    private fun scrollDown(bounds: Rect) {
+        val midX = bounds.centerX().toFloat()
+        val startY = bounds.top + bounds.height() * 0.72f
+        val endY = bounds.top + bounds.height() * 0.28f
+        drag(midX, startY, midX, endY, durationMs = 350L, holdMs = 0L)
+    }
+
+    /**
+     * Scrolls the screen up to return towards the top of the content.
+     */
+    private fun scrollUp(bounds: Rect) {
+        val midX = bounds.centerX().toFloat()
+        val startY = bounds.top + bounds.height() * 0.28f
+        val endY = bounds.top + bounds.height() * 0.72f
+        drag(midX, startY, midX, endY, durationMs = 350L, holdMs = 0L)
+    }
+
+    /**
+     * Dispatches a gesture drag path from (fromX, fromY) to (toX, toY).
+     * If holdMs == 0, finger is released immediately upon reaching (toX, toY).
      */
     private fun drag(
         fromX: Float,
@@ -605,6 +701,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         toY: Float,
         durationMs: Long = 800L,
         holdMs: Long = 200L,
+        durationMs: Long = 400L,
+        holdMs: Long = 0L,
     ) {
         val path = Path().apply {
             moveTo(fromX, fromY)
@@ -620,6 +718,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                 lineTo(toX, toY + 1f)
             }
             builder.addStroke(stroke.continueStroke(hold, durationMs, holdMs, false))
+            builder.addStroke(stroke.continueStroke(hold, 0, holdMs, false))
         }
         val dispatched = dispatchGesture(builder.build(), null, null)
         if (!dispatched) {
@@ -748,6 +847,13 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                 Log.d(TAG, "clicked Sleep entry \"${nodeText(node)}\"")
                 return true
             }
+            // Fallback: tap the center of the node bounding box
+            val rect = Rect().also { node.getBoundsInScreen(it) }
+            if (rect.width() > 0 && rect.height() > 0 && rect.top < navTop) {
+                tap(rect.centerX().toFloat(), rect.centerY().toFloat())
+                Log.d(TAG, "tapped center of Sleep entry \"${nodeText(node)}\" at (${rect.centerX()}, ${rect.centerY()})")
+                return true
+            }
         }
         return false
     }
@@ -756,6 +862,13 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         val matches = root.findAccessibilityNodeInfosByText(text) ?: return false
         for (node in matches) {
             if (clickSelfOrAncestor(node)) return true
+            // Fallback: tap the center of the node on screen
+            val rect = Rect().also { node.getBoundsInScreen(it) }
+            if (rect.width() > 0 && rect.height() > 0) {
+                tap(rect.centerX().toFloat(), rect.centerY().toFloat())
+                Log.d(TAG, "tapped center of node with text \"$text\" at (${rect.centerX()}, ${rect.centerY()})")
+                return true
+            }
         }
         return false
     }
