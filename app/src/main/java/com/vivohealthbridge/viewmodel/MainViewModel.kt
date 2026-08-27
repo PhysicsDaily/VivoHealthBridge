@@ -140,57 +140,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         VivoHealthAccessibilityService.finalizeAssistedSync()
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  Autonomous sync (Legacy Bot Gestures)
-    // ══════════════════════════════════════════════════════════════
-
-    fun startAutoSync(context: Context) {
-        if (_uiState.value.isSyncing || VivoHealthAccessibilityService.isSyncing) return
-
-        // Without the service there is nothing to drive the Vivo app, and
-        // launching it would just dump the user into Vivo Health with no way back.
-        if (!VivoHealthAccessibilityService.isServiceRunning()) {
-            _uiState.value = _uiState.value.copy(
-                isAccessibilityEnabled = false,
-                error = "Turn on VivoHealthBridge in Settings → Accessibility first."
-            )
-            return
-        }
-
-        _uiState.value = _uiState.value.copy(
-            isSyncing = true,
-            syncResult = null,
-            notWritten = emptyList(),
-            error = null
-        )
-
-        VivoHealthAccessibilityService.syncCallback = { parsedData ->
-            viewModelScope.launch { handleSyncResult(parsedData) }
-        }
-
-        if (!VivoHealthAccessibilityService.startSync()) {
-            VivoHealthAccessibilityService.syncCallback = null
-            _uiState.value = _uiState.value.copy(
-                isSyncing = false,
-                error = "Could not start the accessibility service run."
-            )
-            return
-        }
-
-        if (!launchVivoHealth(context)) {
-            // Drop the callback first so the abort does not report an empty sync.
-            VivoHealthAccessibilityService.syncCallback = null
-            VivoHealthAccessibilityService.stopSync()
-            _uiState.value = _uiState.value.copy(
-                isSyncing = false,
-                error = "Could not find the Vivo Health app. Is it installed?"
-            )
-        }
-    }
-
     fun cancelSync() {
         VivoHealthAccessibilityService.syncCallback = null
-        VivoHealthAccessibilityService.stopSync()
+        VivoHealthAccessibilityService.cancelAssistedSync()
         _uiState.value = _uiState.value.copy(isSyncing = false, syncResult = "Sync cancelled")
     }
 
@@ -207,9 +159,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!data.hasAnyData()) {
             _uiState.value = _uiState.value.copy(
                 isSyncing = false,
-                error = if (automated) {
-                    "No data was read from Vivo Health. Open the app manually and check " +
-                            "the sleep screen loads, then try again."
+            error = if (automated) {
+                    "No data was read from Vivo Health. Browse its screens during " +
+                            "Live Sync, then try again."
                 } else {
                     "Nothing to sync — every field was empty."
                 }

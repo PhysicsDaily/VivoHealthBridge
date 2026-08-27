@@ -80,7 +80,7 @@ fun DashboardScreen(
         ) {
             if (!uiState.isAccessibilityEnabled) {
                 WarningCard(
-                    message = "Accessibility Service is not enabled. Auto-sync won't work.",
+                    message = "Accessibility Service is not enabled. Live Sync won't work.",
                     buttonText = "Enable in Settings",
                     onClick = {
                         context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -201,12 +201,6 @@ fun DashboardScreen(
                     textAlign = TextAlign.Center
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                TextButton(
-                    onClick = { viewModel.startAutoSync(context) },
-                    enabled = uiState.isAccessibilityEnabled
-                ) {
-                    Text("🤖 Or use Auto-Pilot (Automated Gestures)", style = MaterialTheme.typography.labelMedium)
-                }
             }
 
             uiState.lastSyncTime?.let { time ->
@@ -227,7 +221,7 @@ fun DashboardScreen(
             if (data == null) {
                 Spacer(modifier = Modifier.weight(1f))
                 Text(
-                    "No data synced yet.\nTap 'Auto-Sync' or use Manual Entry.",
+                    "No data synced yet.\nTap 'Start Live Sync' or use Manual Entry.",
                     style = MaterialTheme.typography.bodyLarge,
                     textAlign = TextAlign.Center,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
