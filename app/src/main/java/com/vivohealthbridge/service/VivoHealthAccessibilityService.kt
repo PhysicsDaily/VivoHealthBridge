@@ -33,7 +33,6 @@ data class SyncProgress(
  * ```
  *  WAIT_APP      Vivo Health reaches the foreground
  *  SYNC_GESTURE  scroll to the top, pull down and release to trigger a sync
- *  SYNC_WAIT     "Syncing…" → "Sync complete"                      (~20 s)
  *  SYNC_WAIT     wait 10 s for watch to synchronize
  *  HOME_COLLECT  scroll to the top, read Steps/Exercise/Calories/Stand
  *  OPEN_SLEEP    tap the Sleep card
@@ -108,8 +107,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         private const val WATCHDOG_MS = 210_000L
 
         private const val WAIT_APP_MS = 15_000L
-        private const val SYNC_WAIT_MS = 40_000L
-        private const val SYNC_PROBE_MS = 8_000L      // no sync sign by now → pull again
         private const val SYNC_WAIT_MS = 10_000L      // wait 10s after pulling down
         private const val HOME_COLLECT_MS = 15_000L
         private const val OPEN_SLEEP_MS = 15_000L
@@ -117,7 +114,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         private const val SLEEP_CARDS_MS = 40_000L
         private const val SLEEP_SCROLL_MS = 45_000L
 
-        private const val MAX_SYNC_PULLS = 3
         private const val MAX_CARD_SWIPES = 6
         private const val MAX_ANALYSIS_SCROLLS = 10
         private const val MAX_TOP_SCROLLS = 4
@@ -181,7 +177,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private val sleepCaptures = mutableListOf<List<String>>()
 
     private var syncPulls = 0
-    private var sawSyncing = false
     private var topScrollsLeft = 0
     private var cardSwipes = 0
     private var lastCardSignature: String? = null
@@ -250,7 +245,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         homeCaptures.clear()
         sleepCaptures.clear()
         syncPulls = 0
-        sawSyncing = false
         topScrollsLeft = MAX_TOP_SCROLLS
         cardSwipes = 0
         lastCardSignature = null
@@ -331,7 +325,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         when (step) {
             Step.WAIT_APP -> waitForApp(root, timedOut)
             Step.SYNC_GESTURE -> pullToSync(root, bounds)
-            Step.SYNC_WAIT -> waitForSync(texts, timedOut)
             Step.SYNC_WAIT -> waitForSync(timedOut)
             Step.HOME_COLLECT -> collectHome(root, texts, timedOut)
             Step.OPEN_SLEEP -> openSleep(root, bounds, texts, timedOut)
@@ -376,54 +369,19 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         val midX = bounds.centerX().toFloat()
         val from = bounds.top + bounds.height() * 0.24f
-        // A later attempt pulls further, in case the refresh threshold is deeper
-        // than the first pull reached.
-        val reach = if (syncPulls == 0) 0.60f else 0.74f
         val reach = 0.65f
         drag(bounds, midX, from, midX, bounds.top + bounds.height() * reach, durationMs = 320L)
         syncPulls++
 
-        goTo(Step.SYNC_WAIT, SYNC_WAIT_MS)
         goTo(Step.SYNC_WAIT, SYNC_WAIT_MS, "10s remaining")
         pause(1_500L)
     }
 
-    private fun waitForSync(texts: List<String>, timedOut: Boolean) {
-        val blob = texts.joinToString(" | ").lowercase()
     private fun waitForSync(timedOut: Boolean) {
         val remainingSec = (((stepDeadline - now()) + 999) / 1000).coerceAtLeast(0)
         publish("${remainingSec}s remaining")
 
-        if (!sawSyncing && (blob.contains("syncing") || blob.contains("synchronizing") ||
-                    blob.contains("synchronising"))
-        ) {
-            sawSyncing = true
-            publish("Watch is syncing…")
-            Log.d(TAG, "sync in progress")
-        }
-
-        val done = blob.contains("sync complete") || blob.contains("sync completed") ||
-                blob.contains("synced") || blob.contains("data synchronized") ||
-                blob.contains("up to date")
-
-        if (done) {
-            Log.d(TAG, "sync complete")
-            beginHomeCollect("Sync complete")
-            return
-        }
-
-        // The pull did not take. Pull again rather than guessing at a different
-        // gesture — refresh is downward-only.
-        if (!sawSyncing && syncPulls < MAX_SYNC_PULLS && now() - stepStarted > SYNC_PROBE_MS) {
-            Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – pulling again (#${syncPulls + 1})")
-            goTo(Step.SYNC_GESTURE, 12_000L, "Pulling down again…")
-            return
-        }
-
         if (timedOut) {
-            // Whatever is on screen is what the watch last delivered; read it.
-            Log.w(TAG, "sync wait timed out (sawSyncing=$sawSyncing) – reading anyway")
-            beginHomeCollect("Sync timed out, reading cached data")
             Log.d(TAG, "sync wait finished (10s) – collecting home activity")
             beginHomeCollect("Sync wait complete")
         }
