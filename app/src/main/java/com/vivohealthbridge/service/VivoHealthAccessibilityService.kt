@@ -539,37 +539,92 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         addCapture(sleepCaptures, texts)
 
+        // 1. Check if "More analysis" is already expanded
+        if (!expandedAnalysis && isAnalysisExpanded(texts)) {
+            expandedAnalysis = true
+            Log.d(TAG, "detected More analysis is already expanded")
+        }
+
+        // 2. If not expanded yet, look for "More analysis" button to tap
         if (!expandedAnalysis && texts.any { it.contains("more analysis", true) }) {
-            if (clickByText(root, "More analysis", bounds)) {
+            if (clickMoreAnalysis(root, bounds)) {
                 expandedAnalysis = true
                 publish("Expanding More analysis…")
                 Log.d(TAG, "tapped More analysis")
-                pause(3_000L)
+                pause(2_500L)
                 return
             }
-            // Either it is sitting at the very bottom edge, where a tap is not
-            // safe to aim, or it is not a button on this build and the section is
-            // already inline. Scroll on and give it a couple more chances before
-            // deciding it is inline.
-            if (analysisScrolls >= 2) expandedAnalysis = true
         }
 
+        // 3. Track scroll progress
         val signature = texts.joinToString("|")
         if (signature == lastScrollSignature) unchangedScrolls++ else unchangedScrolls = 0
         lastScrollSignature = signature
 
-        val bottom = unchangedScrolls >= 2
-        if (bottom || analysisScrolls >= MAX_ANALYSIS_SCROLLS || timedOut) {
-            Log.d(TAG, "analysis read after $analysisScrolls scrolls (bottom=$bottom)")
+        val parsedSleep = parser.parseSleepDetail(sleepCaptures)
+        val hasAllAnalysis = parsedSleep.deepPercent != null &&
+                parsedSleep.awakenings != null &&
+                parsedSleep.averageSpo2 != null
+
+        val atBottom = expandedAnalysis && (hasAllAnalysis || texts.any { it.contains("about sleep", true) })
+        val stalled = unchangedScrolls >= 2 && analysisScrolls >= 1
+
+        if (stalled || atBottom || analysisScrolls >= MAX_ANALYSIS_SCROLLS || timedOut) {
+            Log.d(
+                TAG,
+                "analysis read complete after $analysisScrolls scrolls " +
+                        "(stalled=$stalled, atBottom=$atBottom, expanded=$expandedAnalysis)"
+            )
             finish()
             return
         }
 
-        if (!scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
-            unchangedScrolls++
-        }
+        // 4. Scroll down using physical gesture drag
+        scrollDown(bounds)
         analysisScrolls++
-        pause(1_300L)
+        publish("Reading sleep analysis…")
+        pause(1_500L)
+    }
+
+    private fun isAnalysisExpanded(texts: List<String>): Boolean {
+        val blob = texts.joinToString(" | ").lowercase()
+        return blob.contains("collapse") ||
+                blob.contains("deep sleep proportion") ||
+                blob.contains("light sleep proportion") ||
+                blob.contains("number of awakenings") ||
+                blob.contains("average blood oxygen")
+    }
+
+    private fun clickMoreAnalysis(root: AccessibilityNodeInfo, bounds: Rect): Boolean {
+        val node = findNode(root) { n ->
+            val text = nodeText(n)?.lowercase() ?: return@findNode false
+            text.contains("more analysis")
+        } ?: return false
+
+        Log.d(TAG, "found More analysis node: \"${nodeText(node)}\"")
+
+        // Try standard action click first
+        if (clickSelfOrAncestor(node, bounds)) {
+            Log.d(TAG, "clicked More analysis via ACTION_CLICK")
+            return true
+        }
+
+        // Gesture tap fallback on the node's screen coordinates
+        var targetNode: AccessibilityNodeInfo? = node
+        val rect = Rect()
+        while (targetNode != null) {
+            targetNode.getBoundsInScreen(rect)
+            if (rect.height() > 0 && rect.width() > 0) break
+            targetNode = targetNode.parent
+        }
+
+        if (rect.height() > 0 && isInContentBand(bounds, rect)) {
+            Log.d(TAG, "tapping More analysis via gesture at (${rect.exactCenterX()}, ${rect.exactCenterY()})")
+            tap(bounds, rect.exactCenterX(), rect.exactCenterY())
+            return true
+        }
+
+        return false
     }
 
     // ─────────────────────────────────────────────────────
@@ -755,6 +810,30 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         bounds.left + bounds.width() * EDGE_SAFE,
         bounds.left + bounds.width() * (1f - EDGE_SAFE),
     )
+
+    /** Dispatches a single tap gesture inside the safe content band. */
+    private fun tap(bounds: Rect, x: Float, y: Float) {
+        val sx = safeX(bounds, x)
+        val sy = safeY(bounds, y)
+        val path = Path().apply {
+            moveTo(sx, sy)
+            lineTo(sx, sy)
+        }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 60L))
+            .build()
+        if (!dispatchGesture(gesture, null, null)) {
+            Log.e(TAG, "tap gesture refused")
+        }
+    }
+
+    /** Swipes upwards to scroll page content down. */
+    private fun scrollDown(bounds: Rect) {
+        val midX = bounds.centerX().toFloat()
+        val fromY = bounds.top + bounds.height() * 0.72f
+        val toY = bounds.top + bounds.height() * 0.28f
+        drag(bounds, midX, fromY, midX, toY, durationMs = 280L)
+    }
 
     /**
      * Moves the vitals carousel on by one card.
@@ -959,10 +1038,14 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         return false
     }
 
-    /** Scrolls the deepest scrollable container, which is the content list. */
+    /** Scrolls the deepest vertical scrollable container, which is the content list. */
     private fun scroll(root: AccessibilityNodeInfo, action: Int): Boolean {
         val scrollables = mutableListOf<AccessibilityNodeInfo>()
-        collectNodes(root, 0, scrollables) { it.isScrollable }
+        collectNodes(root, 0, scrollables) { node ->
+            if (!node.isScrollable) return@collectNodes false
+            val rect = Rect().also { node.getBoundsInScreen(it) }
+            rect.height() >= rect.width()
+        }
         for (node in scrollables.asReversed()) {
             if (node.performAction(action)) return true
         }
