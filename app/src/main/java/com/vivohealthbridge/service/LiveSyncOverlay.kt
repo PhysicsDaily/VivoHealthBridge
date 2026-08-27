@@ -130,18 +130,12 @@ class LiveSyncOverlay(
                 // 3. Heart Rate
                 if (hr?.hasData() == true) {
                     val rangeStr = hr.range?.let { "${it.min}-${it.max} bpm" }
-                    val curr = hr.currentBpm?.let { "$it bpm" }
-                    val rangeStr = hr.range?.let { "${it.min}-${it.max}" }
                     val restStr = hr.restingBpm?.let { "rest $it" }
                     val str = listOfNotNull(rangeStr, restStr).joinToString(", ").ifEmpty { "${hr.currentBpm} bpm" }
-                    val walkStr = hr.walkingBpm?.let { "walk $it" }
-                    val sleepStr = hr.sleepingBpm?.let { "sleep $it" }
-                    val str = listOfNotNull(curr, rangeStr, restStr, walkStr, sleepStr).joinToString(", ")
                     hrTextView?.text = "💓 HR: $str ✓"
                     hrTextView?.setTextColor(COLOR_SUCCESS)
                 } else if (data.restingHeartRateBpm != null || data.heartRateBpm != null) {
                     val str = data.restingHeartRateBpm?.let { "rest $it bpm" } ?: "${data.heartRateBpm} bpm"
-                    val str = data.heartRateBpm?.let { "$it bpm" } ?: "rest ${data.restingHeartRateBpm} bpm"
                     hrTextView?.text = "💓 HR: $str ✓"
                     hrTextView?.setTextColor(COLOR_SUCCESS)
                 } else {
@@ -152,17 +146,8 @@ class LiveSyncOverlay(
                 // 4. Stress
                 if (st?.hasData() == true) {
                     val avgStr = st.average?.let { "avg $it" } ?: st.range?.let { "${it.min}-${it.max}" }
-                    val curr = st.current?.let { "$it" }
-                    val avgStr = st.average?.takeIf { it != st.current }?.let { "avg $it" }
                     val catStr = st.category?.let { " ($it)" } ?: ""
                     val str = if (avgStr != null) "$avgStr$catStr" else (st.category ?: "")
-                    val rangeStr = st.range?.let { "${it.min}-${it.max}" }
-                    val main = curr ?: avgStr ?: "—"
-                    val extras = listOfNotNull(
-                        if (curr != null) avgStr else null,
-                        rangeStr
-                    ).joinToString(", ")
-                    val str = if (extras.isNotEmpty()) "$main$catStr, $extras" else "$main$catStr"
                     stressTextView?.text = "🧠 Stress: $str ✓"
                     stressTextView?.setTextColor(COLOR_SUCCESS)
                 } else if (data.stressLevel != null) {
@@ -178,18 +163,6 @@ class LiveSyncOverlay(
                 if (oxy?.hasData() == true) {
                     val avgStr = oxy.average?.let { "avg $it%" } ?: oxy.range?.let { "${it.min}-${it.max}%" } ?: oxy.averageSleep?.let { "sleep $it%" } ?: "${oxy.current}%"
                     spo2TextView?.text = "🫁 SpO₂: $avgStr ✓"
-                    val curr = oxy.current?.let { "$it%" }
-                    val avgStr = oxy.average?.takeIf { it != oxy.current }?.let { "avg $it%" }
-                    val rangeStr = oxy.range?.let { "${it.min}-${it.max}%" }
-                    val sleepStr = oxy.averageSleep?.let { "sleep $it%" }
-                    val main = curr ?: avgStr ?: rangeStr ?: "—"
-                    val extras = listOfNotNull(
-                        if (curr != null) avgStr else null,
-                        if (main != rangeStr) rangeStr else null,
-                        sleepStr
-                    ).joinToString(", ")
-                    val str = if (extras.isNotEmpty()) "$main ($extras)" else main
-                    spo2TextView?.text = "🫁 SpO₂: $str ✓"
                     spo2TextView?.setTextColor(COLOR_SUCCESS)
                 } else {
                     spo2TextView?.text = "🫁 SpO₂: —"
