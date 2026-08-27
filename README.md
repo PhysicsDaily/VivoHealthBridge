@@ -78,20 +78,19 @@ Because Xiaomi/MIUI has extra security layers for sideloaded apps and background
 
 ## 🔄 Step 3: How to Use
 
-### Option A: Automated Sync
-1. Open **VivoHealthBridge**.
-2. Tap the large **Auto-Sync from Vivo Health** button.
-3. The app will automatically:
-   - Launch the Vivo Health app.
-   - Read your daily summary cards:
-     - **Heart Rate**: Current BPM + Resting HR
-     - **Sleep**: Total duration + Deep / Light / REM stage breakdown + Awake time
-     - **Oxygen Saturation**: Current SpO2 % + Sleep SpO2 %
-     - **Stress**: Score (0–100) mapped to Health Connect HRV records
-     - **Weight** & **Exercise distance**
-   - Seamlessly return and write the records into Health Connect!
+### Option A: Live Sync (Recommended · Manual Navigation)
+1. Open **VivoHealthBridge** and tap **Start Live Sync (Manual)**.
+2. The Vivo Health app opens with a compact floating helper pill (`🌉 VivoBridge Live`) on screen.
+3. Move through the Vivo Health app at your own pace:
+   - View your **Activity rings** (Steps, Calories, Exercise, Stand, Distance).
+   - Tap your **Sleep** card, swipe through vitals (Heart Rate, Respiratory, SpO₂, HRV), expand **More analysis**, and scroll through stages (Deep, Light, REM).
+4. The floating helper will show green checkmarks as each metric is captured live (`🏃 Steps: ✓`, `😴 Sleep: ✓`, `💓 Vitals: 4/4 ✓`, `📊 Stages: 3/3 ✓`).
+5. Tap **🚀 Sync to Health Connect** directly on the floating helper (or switch back to VivoHealthBridge). Everything is committed to Health Connect instantly!
 
-### Option B: Manual Entry
+### Option B: Auto-Pilot (Automated Gestures)
+- Tap the **🤖 Or use Auto-Pilot** button on the dashboard to have the accessibility service automatically pull down to refresh, scroll, and tap cards for you hands-free.
+
+### Option C: Manual Entry
 1. Switch to the **Manual Entry** tab at the bottom.
 2. Tap any metric (Heart Rate, Sleep with stages, SpO2, Stress, Steps, Weight).
 3. Enter your values and tap **Save**. It writes directly to Health Connect immediately.

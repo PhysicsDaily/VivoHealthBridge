@@ -85,8 +85,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         checkStatus()
     }
 
+    /** Live captured health data during assisted sync mode. */
+    val liveCapturedData: StateFlow<ParsedHealthData> = VivoHealthAccessibilityService.liveCapturedData
+
+    val isAssistedSyncActive: Boolean
+        get() = VivoHealthAccessibilityService.isAssistedSyncActive
+
     // ══════════════════════════════════════════════════════════════
-    //  Automated sync
+    //  Assisted Sync (Manual Navigation)
+    // ══════════════════════════════════════════════════════════════
+
+    fun startAssistedSync(context: Context) {
+        if (_uiState.value.isSyncing || VivoHealthAccessibilityService.isSyncing) return
+
+        if (!VivoHealthAccessibilityService.isServiceRunning()) {
+            _uiState.value = _uiState.value.copy(
+                isAccessibilityEnabled = false,
+                error = "Turn on VivoHealthBridge in Settings → Accessibility first."
+            )
+            return
+        }
+
+        _uiState.value = _uiState.value.copy(
+            isSyncing = true,
+            syncResult = null,
+            notWritten = emptyList(),
+            error = null
+        )
+
+        VivoHealthAccessibilityService.syncCallback = { parsedData ->
+            viewModelScope.launch { handleSyncResult(parsedData, automated = true) }
+        }
+
+        if (!VivoHealthAccessibilityService.startAssistedSync()) {
+            VivoHealthAccessibilityService.syncCallback = null
+            _uiState.value = _uiState.value.copy(
+                isSyncing = false,
+                error = "Could not start the assisted live capture mode."
+            )
+            return
+        }
+
+        if (!launchVivoHealth(context)) {
+            VivoHealthAccessibilityService.syncCallback = null
+            VivoHealthAccessibilityService.cancelAssistedSync()
+            _uiState.value = _uiState.value.copy(
+                isSyncing = false,
+                error = "Could not find the Vivo Health app. Is it installed?"
+            )
+        }
+    }
+
+    fun finalizeAssistedSync() {
+        VivoHealthAccessibilityService.finalizeAssistedSync()
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  Autonomous sync (Legacy Bot Gestures)
     // ══════════════════════════════════════════════════════════════
 
     fun startAutoSync(context: Context) {

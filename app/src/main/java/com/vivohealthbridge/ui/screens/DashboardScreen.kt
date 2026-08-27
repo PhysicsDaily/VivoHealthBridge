@@ -39,6 +39,7 @@ fun DashboardScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val progress by viewModel.syncProgress.collectAsStateWithLifecycle()
+    val liveData by viewModel.liveCapturedData.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -111,58 +112,114 @@ fun DashboardScreen(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    if (syncing) {
-                        if (progress.percent > 0) {
-                            LinearProgressIndicator(
-                                progress = { progress.percent / 100f },
-                                modifier = Modifier.fillMaxWidth()
-                            )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (syncing) {
+                if (viewModel.isAssistedSyncActive) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        "Live Capture Active 📱",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        if (liveData.hasAnyData()) {
+                            "Captured: ${liveData.summaryString()}"
                         } else {
-                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            "Navigate Vivo Health — metrics capture automatically"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (liveData.hasAnyData()) {
+                            Button(
+                                onClick = { viewModel.finalizeAssistedSync() },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                            ) {
+                                Text("🚀 Sync Now")
+                            }
                         }
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(progress.step, style = MaterialTheme.typography.bodyLarge)
-                        if (progress.detail.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                progress.detail,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(8.dp))
-                        TextButton(onClick = { viewModel.cancelSync() }) { Text("Cancel") }
-                    } else {
-                        Button(
-                            onClick = { viewModel.startAutoSync(context) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(56.dp),
-                            enabled = uiState.isAccessibilityEnabled
+                        OutlinedButton(
+                            onClick = { viewModel.cancelSync() },
+                            modifier = if (liveData.hasAnyData()) Modifier.weight(1f) else Modifier.fillMaxWidth()
                         ) {
-                            Icon(painterResource(R.drawable.ic_sync), contentDescription = null)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Auto-Sync from Vivo Health", fontSize = 16.sp)
+                            Text("Cancel")
                         }
                     }
-
-                    uiState.lastSyncTime?.let { time ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        val fmt = SimpleDateFormat("MMM dd, hh:mm a", Locale.getDefault())
+                } else {
+                    if (progress.percent > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress.percent / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(progress.step, style = MaterialTheme.typography.bodyLarge)
+                    if (progress.detail.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            "Last sync: ${fmt.format(Date(time))}",
+                            progress.detail,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { viewModel.cancelSync() }) { Text("Cancel") }
+                }
+            } else {
+                Button(
+                    onClick = { viewModel.startAssistedSync(context) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp),
+                    enabled = uiState.isAccessibilityEnabled
+                ) {
+                    Icon(painterResource(R.drawable.ic_sync), contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Start Live Sync (Manual)", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "You move the app yourself; we read the data on screen and sync to Health Connect.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                TextButton(
+                    onClick = { viewModel.startAutoSync(context) },
+                    enabled = uiState.isAccessibilityEnabled
+                ) {
+                    Text("🤖 Or use Auto-Pilot (Automated Gestures)", style = MaterialTheme.typography.labelMedium)
                 }
             }
+
+            uiState.lastSyncTime?.let { time ->
+                Spacer(modifier = Modifier.height(8.dp))
+                val fmt = SimpleDateFormat("MMM dd, hh:mm a", Locale.getDefault())
+                Text(
+                    "Last sync: ${fmt.format(Date(time))}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 
             Spacer(modifier = Modifier.height(16.dp))
 

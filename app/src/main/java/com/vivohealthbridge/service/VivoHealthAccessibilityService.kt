@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.vivohealthbridge.MainActivity
 import com.vivohealthbridge.data.models.ParsedHealthData
+import com.vivohealthbridge.data.models.merge
 import com.vivohealthbridge.parser.VivoHealthParser
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -77,14 +78,51 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         private val _progress = MutableStateFlow(SyncProgress())
         val progress: StateFlow<SyncProgress> = _progress.asStateFlow()
 
+        enum class SyncMode {
+            ASSISTED_MANUAL,
+            AUTONOMOUS
+        }
+
+        var currentSyncMode: SyncMode = SyncMode.ASSISTED_MANUAL
+            private set
+
+        private val _liveCapturedData = MutableStateFlow(ParsedHealthData())
+        val liveCapturedData: StateFlow<ParsedHealthData> = _liveCapturedData.asStateFlow()
+
         val isSyncing: Boolean get() = _progress.value.active
+
+        val isAssistedSyncActive: Boolean
+            get() = currentSyncMode == SyncMode.ASSISTED_MANUAL && isSyncing
 
         /** Plain-text step label, for callers that cannot collect a flow. */
         val currentStepDescription: String get() = _progress.value.step
 
         fun isServiceRunning(): Boolean = instance != null
 
-        /** @return false if the service is not enabled, or a run is already going. */
+        /** Starts the assisted live capture mode (user navigates, service reads). */
+        fun startAssistedSync(): Boolean {
+            val service = instance ?: run {
+                Log.w(TAG, "startAssistedSync ignored – service is not connected")
+                return false
+            }
+            if (isSyncing) {
+                Log.w(TAG, "startAssistedSync ignored – already syncing")
+                return false
+            }
+            service.beginAssistedRun()
+            return true
+        }
+
+        /** Finalizes assisted sync and syncs all collected data to Health Connect. */
+        fun finalizeAssistedSync() {
+            instance?.finishAssistedRun()
+        }
+
+        fun cancelAssistedSync() {
+            instance?.abortRun("Assisted sync cancelled")
+        }
+
+        /** Legacy: Starts autonomous gesture-driven bot sync. */
         fun startSync(): Boolean {
             val service = instance ?: run {
                 Log.w(TAG, "startSync ignored – service is not connected")
@@ -190,6 +228,12 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private var sleepReopens = 0
     private var offSleepStrikes = 0
 
+    // ── Assisted Live Capture state ───────────────────────────
+    private val liveHomeCaptures = mutableListOf<List<String>>()
+    private val liveSleepCaptures = mutableListOf<List<String>>()
+    private var overlay: LiveSyncOverlay? = null
+    private var lastLiveCaptureSignature: String? = null
+
     private val ticker = object : Runnable {
         override fun run() {
             if (step == Step.IDLE) return
@@ -202,6 +246,26 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val assistedTicker = object : Runnable {
+        override fun run() {
+            if (currentSyncMode != SyncMode.ASSISTED_MANUAL || !isSyncing) return
+            try {
+                val root = rootInActiveWindow
+                if (root != null && isVivoHealth(root.packageName?.toString())) {
+                    if (overlay?.isShowing != true) {
+                        overlay?.show()
+                    }
+                    inspectAndCaptureLive(root)
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "assistedTicker failed", t)
+            }
+            if (currentSyncMode == SyncMode.ASSISTED_MANUAL && isSyncing) {
+                handler.postDelayed(this, 500L)
+            }
+        }
+    }
+
     // ─────────────────────────────────────────────────────
     //  Service lifecycle
     // ─────────────────────────────────────────────────────
@@ -210,38 +274,163 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         serviceInfo = serviceInfo.apply {
-            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = flags or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
                     AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
-            notificationTimeout = 200
+            notificationTimeout = 100
         }
+        overlay = LiveSyncOverlay(
+            context = this,
+            onSyncClicked = { finishAssistedRun() },
+            onCancelClicked = { abortRun("Assisted sync cancelled") }
+        )
         Log.d(TAG, "connected (gestures=${serviceInfo.capabilities and
                 AccessibilityServiceInfo.CAPABILITY_CAN_PERFORM_GESTURES})")
     }
 
-    /** The machine polls; events are only useful as a hint to look sooner. */
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
+    /** In assisted mode, inspect the screen as soon as window content or scroll changes. */
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (currentSyncMode == SyncMode.ASSISTED_MANUAL && isSyncing) {
+            val root = rootInActiveWindow ?: return
+            if (isVivoHealth(root.packageName?.toString())) {
+                inspectAndCaptureLive(root)
+            }
+        }
+    }
 
     override fun onInterrupt() {
         Log.w(TAG, "interrupted")
-        if (step != Step.IDLE) abortRun("Interrupted")
+        if (isSyncing) abortRun("Interrupted")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(ticker)
-        if (step != Step.IDLE) abortRun("Service stopped")
+        handler.removeCallbacks(assistedTicker)
+        overlay?.hide()
+        overlay = null
+        if (isSyncing) abortRun("Service stopped")
         instance = null
         Log.d(TAG, "destroyed")
     }
 
     // ─────────────────────────────────────────────────────
-    //  Run control
+    //  Assisted Run Control (Manual Navigation)
+    // ─────────────────────────────────────────────────────
+
+    private fun beginAssistedRun() {
+        currentSyncMode = SyncMode.ASSISTED_MANUAL
+        step = Step.IDLE // autonomous state machine stays idle
+        liveHomeCaptures.clear()
+        liveSleepCaptures.clear()
+        lastLiveCaptureSignature = null
+        _liveCapturedData.value = ParsedHealthData()
+        _progress.value = SyncProgress(
+            active = true,
+            step = "Live Capture Active",
+            detail = "Browse Vivo Health — metrics capture automatically",
+            percent = 50
+        )
+        if (overlay == null) {
+            overlay = LiveSyncOverlay(
+                context = this,
+                onSyncClicked = { finishAssistedRun() },
+                onCancelClicked = { abortRun("Assisted sync cancelled") }
+            )
+        }
+        overlay?.show()
+        handler.removeCallbacks(ticker)
+        handler.removeCallbacks(assistedTicker)
+        handler.post(assistedTicker)
+        Log.d(TAG, "Assisted live sync started")
+    }
+
+    private fun inspectAndCaptureLive(root: AccessibilityNodeInfo) {
+        val texts = capture(root)
+        if (texts.isEmpty()) return
+
+        val sig = texts.joinToString("|")
+        if (sig == lastLiveCaptureSignature) return
+        lastLiveCaptureSignature = sig
+
+        var changed = false
+        var current = _liveCapturedData.value
+
+        // 1. Home Activity rings
+        val isHome = texts.any {
+            it.equals("steps", true) || it.equals("calories", true) ||
+                    it.equals("stand", true) || it.contains("step count", true)
+        }
+        if (isHome) {
+            addCapture(liveHomeCaptures, texts)
+            val act = parser.parseHomeActivity(liveHomeCaptures)
+            if (act.hasData()) {
+                val mergedAct = current.activity?.merge(act) ?: act
+                if (mergedAct != current.activity) {
+                    current = current.copy(activity = mergedAct)
+                    changed = true
+                }
+            }
+        }
+
+        // 2. Sleep Detail
+        val isSleep = onSleepDetail(texts) || stillOnSleepDetail(texts)
+        if (isSleep) {
+            addCapture(liveSleepCaptures, texts)
+            val sleep = parser.parseSleepDetail(liveSleepCaptures)
+            if (sleep.hasData()) {
+                val mergedSleep = current.sleep?.merge(sleep) ?: sleep
+                if (mergedSleep != current.sleep) {
+                    current = current.copy(sleep = mergedSleep)
+                    changed = true
+                }
+            }
+        }
+
+        if (changed) {
+            _liveCapturedData.value = current
+            overlay?.update(current)
+            _progress.value = SyncProgress(
+                active = true,
+                step = "Captured: ${current.summaryString()}",
+                detail = "Tap 'Sync' on overlay or return to app when done",
+                percent = 75
+            )
+            Log.d(TAG, "Live data updated: ${current.summaryString()}")
+        }
+    }
+
+    private fun finishAssistedRun() {
+        handler.removeCallbacks(assistedTicker)
+        overlay?.hide()
+
+        val finalData = _liveCapturedData.value
+        Log.d(TAG, "finishAssistedRun with data: ${finalData.summaryString()}")
+
+        _progress.value = SyncProgress(
+            active = false,
+            step = if (finalData.hasAnyData()) "Done" else "No data found",
+            percent = 100
+        )
+
+        val callback = syncCallback
+        syncCallback = null
+        callback?.invoke(finalData)
+
+        returnToApp()
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  Autonomous Run control (Legacy Bot Gestures)
     // ─────────────────────────────────────────────────────
 
     private fun beginRun() {
+        currentSyncMode = SyncMode.AUTONOMOUS
+        overlay?.hide()
         homeCaptures.clear()
         sleepCaptures.clear()
         syncPulls = 0
@@ -268,6 +457,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         Log.w(TAG, "run aborted: $reason")
         step = Step.IDLE
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(assistedTicker)
+        overlay?.hide()
         _progress.value = SyncProgress(active = false, step = reason)
         val callback = syncCallback
         syncCallback = null

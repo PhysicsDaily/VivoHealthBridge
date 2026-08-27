@@ -1,6 +1,10 @@
 package com.vivohealthbridge.parser
 
+import com.vivohealthbridge.data.models.DailyActivity
 import com.vivohealthbridge.data.models.MetricRange
+import com.vivohealthbridge.data.models.ParsedHealthData
+import com.vivohealthbridge.data.models.SleepDetail
+import com.vivohealthbridge.data.models.merge
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -286,5 +290,78 @@ class VivoHealthParserTest {
         assertFalse(sleep.hasData())
         assertNull(sleep.totalMinutes)
         assertNull(sleep.score)
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    //  Step 3 · Live capture merge and aggregation tests
+    // ══════════════════════════════════════════════════════════════
+
+    @Test
+    fun `DailyActivity merge preserves earlier reads and overwrites with newer non-null values`() {
+        val read1 = DailyActivity(steps = 5000L, stepsGoal = 8000L, activeCalories = 250)
+        val read2 = DailyActivity(steps = 5500L, distanceKm = 3.2f, exerciseMinutes = 45)
+
+        val merged = read1.merge(read2)
+        assertEquals(5500L, merged.steps)
+        assertEquals(8000L, merged.stepsGoal)
+        assertEquals(250, merged.activeCalories)
+        assertEquals(3.2f, merged.distanceKm!!, 0.001f)
+        assertEquals(45, merged.exerciseMinutes)
+    }
+
+    @Test
+    fun `SleepDetail merge aggregates vitals and stages across carousel swipes and scrolls`() {
+        val headerRead = SleepDetail(totalMinutes = 480, bedTime = "23:00", wakeTime = "07:00", score = 82)
+        val vitalsRead = SleepDetail(
+            heartRate = MetricRange(55, 95),
+            spo2 = MetricRange(96, 99)
+        )
+        val stagesRead = SleepDetail(
+            deepMinutes = 90,
+            lightMinutes = 240,
+            remMinutes = 120,
+            awakenings = 2
+        )
+
+        val accumulated = headerRead.merge(vitalsRead).merge(stagesRead)
+        assertEquals(480, accumulated.totalMinutes)
+        assertEquals("23:00", accumulated.bedTime)
+        assertEquals("07:00", accumulated.wakeTime)
+        assertEquals(82, accumulated.score)
+        assertEquals(MetricRange(55, 95), accumulated.heartRate)
+        assertEquals(MetricRange(96, 99), accumulated.spo2)
+        assertEquals(90, accumulated.deepMinutes)
+        assertEquals(240, accumulated.lightMinutes)
+        assertEquals(120, accumulated.remMinutes)
+        assertEquals(2, accumulated.awakenings)
+        assertEquals(2, accumulated.vitalsCount)
+        assertEquals(3, accumulated.stagesCount)
+    }
+
+    @Test
+    fun `ParsedHealthData merge and summaryString reflect aggregated live state`() {
+        val act = DailyActivity(steps = 8432L)
+        val sleep = SleepDetail(
+            totalMinutes = 440,
+            heartRate = MetricRange(50, 110),
+            spo2 = MetricRange(95, 100),
+            deepMinutes = 70,
+            lightMinutes = 250,
+            remMinutes = 100
+        )
+        val data1 = ParsedHealthData(activity = act)
+        val data2 = ParsedHealthData(sleep = sleep)
+
+        val merged = data1.merge(data2)
+        assertEquals(8432L, merged.activity?.steps)
+        assertEquals(440, merged.sleep?.totalMinutes)
+        assertEquals(2, merged.sleep?.vitalsCount)
+        assertEquals(3, merged.sleep?.stagesCount)
+
+        val summary = merged.summaryString()
+        assertTrue(summary.contains("8432 steps"))
+        assertTrue(summary.contains("7h 20m sleep"))
+        assertTrue(summary.contains("2 vitals"))
+        assertTrue(summary.contains("3 stages"))
     }
 }

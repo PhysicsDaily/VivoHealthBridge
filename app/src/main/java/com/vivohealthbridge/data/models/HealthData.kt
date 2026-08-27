@@ -98,6 +98,9 @@ data class SleepDetail(
         val m = parts[1].toIntOrNull() ?: return null
         return h * 60 + m
     }
+
+    val vitalsCount: Int get() = listOfNotNull(heartRate, respiratoryRate, spo2, hrv).size
+    val stagesCount: Int get() = listOfNotNull(deepMinutes ?: deepPercent, lightMinutes ?: lightPercent, remMinutes ?: remPercent).size
 }
 
 /**
@@ -126,6 +129,80 @@ data class ParsedHealthData(
     fun hasAnyData(): Boolean = hasSleepData() || activity?.hasData() == true ||
             heartRateBpm != null || restingHeartRateBpm != null || oxygenSaturation != null ||
             stressLevel != null || weightKg != null
+
+    fun summaryString(): String {
+        val parts = mutableListOf<String>()
+        activity?.steps?.let { parts.add("$it steps") }
+        sleep?.totalMinutes?.let { parts.add("${it / 60}h ${it % 60}m sleep") }
+        val vitals = sleep?.vitalsCount ?: 0
+        if (vitals > 0) parts.add("$vitals vitals")
+        val stages = sleep?.stagesCount ?: 0
+        if (stages > 0) parts.add("$stages stages")
+        return if (parts.isEmpty()) "No metrics captured" else parts.joinToString(" · ")
+    }
+}
+
+fun DailyActivity.merge(other: DailyActivity): DailyActivity = DailyActivity(
+    steps = other.steps ?: this.steps,
+    stepsGoal = other.stepsGoal ?: this.stepsGoal,
+    exerciseMinutes = other.exerciseMinutes ?: this.exerciseMinutes,
+    exerciseGoalMinutes = other.exerciseGoalMinutes ?: this.exerciseGoalMinutes,
+    activeCalories = other.activeCalories ?: this.activeCalories,
+    activeCaloriesGoal = other.activeCaloriesGoal ?: this.activeCaloriesGoal,
+    standHours = other.standHours ?: this.standHours,
+    standGoalHours = other.standGoalHours ?: this.standGoalHours,
+    distanceKm = other.distanceKm ?: this.distanceKm,
+)
+
+fun SleepDetail.merge(other: SleepDetail): SleepDetail = SleepDetail(
+    totalMinutes = other.totalMinutes ?: this.totalMinutes,
+    bedTime = other.bedTime ?: this.bedTime,
+    wakeTime = other.wakeTime ?: this.wakeTime,
+    heartRate = other.heartRate ?: this.heartRate,
+    respiratoryRate = other.respiratoryRate ?: this.respiratoryRate,
+    spo2 = other.spo2 ?: this.spo2,
+    hrv = other.hrv ?: this.hrv,
+    score = other.score ?: this.score,
+    scoreLabel = other.scoreLabel ?: this.scoreLabel,
+    deepMinutes = other.deepMinutes ?: this.deepMinutes,
+    lightMinutes = other.lightMinutes ?: this.lightMinutes,
+    remMinutes = other.remMinutes ?: this.remMinutes,
+    deepPercent = other.deepPercent ?: this.deepPercent,
+    lightPercent = other.lightPercent ?: this.lightPercent,
+    remPercent = other.remPercent ?: this.remPercent,
+    deepRating = other.deepRating ?: this.deepRating,
+    lightRating = other.lightRating ?: this.lightRating,
+    remRating = other.remRating ?: this.remRating,
+    awakenings = other.awakenings ?: this.awakenings,
+    awakeMinutes = other.awakeMinutes ?: this.awakeMinutes,
+    continuityScore = other.continuityScore ?: this.continuityScore,
+    continuityRating = other.continuityRating ?: this.continuityRating,
+    averageSpo2 = other.averageSpo2 ?: this.averageSpo2,
+    stagesDerived = other.stagesDerived || this.stagesDerived,
+)
+
+fun ParsedHealthData.merge(other: ParsedHealthData): ParsedHealthData {
+    val mergedActivity = when {
+        this.activity != null && other.activity != null -> this.activity.merge(other.activity)
+        other.activity != null -> other.activity
+        else -> this.activity
+    }
+    val mergedSleep = when {
+        this.sleep != null && other.sleep != null -> this.sleep.merge(other.sleep)
+        other.sleep != null -> other.sleep
+        else -> this.sleep
+    }
+    return ParsedHealthData(
+        activity = mergedActivity,
+        sleep = mergedSleep,
+        heartRateBpm = other.heartRateBpm ?: this.heartRateBpm,
+        restingHeartRateBpm = other.restingHeartRateBpm ?: this.restingHeartRateBpm,
+        oxygenSaturation = other.oxygenSaturation ?: this.oxygenSaturation,
+        stressLevel = other.stressLevel ?: this.stressLevel,
+        stressCategory = other.stressCategory ?: this.stressCategory,
+        weightKg = other.weightKg ?: this.weightKg,
+        syncTimestamp = System.currentTimeMillis()
+    )
 }
 
 enum class SyncStatus {
