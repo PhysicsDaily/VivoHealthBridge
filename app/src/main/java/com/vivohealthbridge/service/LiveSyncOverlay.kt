@@ -54,8 +54,9 @@ class LiveSyncOverlay(
     // Badges
     private var stepsTextView: TextView? = null
     private var sleepTextView: TextView? = null
-    private var vitalsTextView: TextView? = null
-    private var stagesTextView: TextView? = null
+    private var hrTextView: TextView? = null
+    private var stressTextView: TextView? = null
+    private var spo2TextView: TextView? = null
     private var syncButton: Button? = null
 
     // Window params
@@ -95,8 +96,11 @@ class LiveSyncOverlay(
             try {
                 val act = data.activity
                 val sleep = data.sleep
+                val hr = data.heartRate
+                val st = data.stress
+                val oxy = data.oxygenSaturation
 
-                // Steps
+                // 1. Steps
                 if (act?.steps != null) {
                     val goal = act.stepsGoal?.let { "/$it" } ?: ""
                     stepsTextView?.text = "🏃 Steps: ${act.steps}$goal ✓"
@@ -106,36 +110,63 @@ class LiveSyncOverlay(
                     stepsTextView?.setTextColor(COLOR_MUTED)
                 }
 
-                // Sleep Duration
+                // 2. Sleep Duration
                 if (sleep?.totalMinutes != null) {
                     val h = sleep.totalMinutes / 60
                     val m = sleep.totalMinutes % 60
                     val scoreStr = sleep.score?.let { " ($it pts)" } ?: ""
                     sleepTextView?.text = "😴 Sleep: ${h}h ${m}m$scoreStr ✓"
                     sleepTextView?.setTextColor(COLOR_SUCCESS)
+                } else if ((sleep?.vitalsCount ?: 0) > 0 || (sleep?.stagesCount ?: 0) > 0) {
+                    val vCount = sleep?.vitalsCount ?: 0
+                    val sCount = sleep?.stagesCount ?: 0
+                    sleepTextView?.text = "😴 Sleep: $vCount vitals, $sCount stages ✓"
+                    sleepTextView?.setTextColor(COLOR_SUCCESS)
                 } else {
                     sleepTextView?.text = "😴 Sleep: —"
                     sleepTextView?.setTextColor(COLOR_MUTED)
                 }
 
-                // Vitals
-                val vitals = sleep?.vitalsCount ?: 0
-                if (vitals > 0) {
-                    vitalsTextView?.text = "💓 Vitals: $vitals/4 captured ✓"
-                    vitalsTextView?.setTextColor(COLOR_SUCCESS)
+                // 3. Heart Rate
+                if (hr?.hasData() == true) {
+                    val rangeStr = hr.range?.let { "${it.min}-${it.max} bpm" }
+                    val restStr = hr.restingBpm?.let { "rest $it" }
+                    val str = listOfNotNull(rangeStr, restStr).joinToString(", ").ifEmpty { "${hr.currentBpm} bpm" }
+                    hrTextView?.text = "💓 HR: $str ✓"
+                    hrTextView?.setTextColor(COLOR_SUCCESS)
+                } else if (data.restingHeartRateBpm != null || data.heartRateBpm != null) {
+                    val str = data.restingHeartRateBpm?.let { "rest $it bpm" } ?: "${data.heartRateBpm} bpm"
+                    hrTextView?.text = "💓 HR: $str ✓"
+                    hrTextView?.setTextColor(COLOR_SUCCESS)
                 } else {
-                    vitalsTextView?.text = "💓 Vitals: —"
-                    vitalsTextView?.setTextColor(COLOR_MUTED)
+                    hrTextView?.text = "💓 HR: —"
+                    hrTextView?.setTextColor(COLOR_MUTED)
                 }
 
-                // Stages
-                val stages = sleep?.stagesCount ?: 0
-                if (stages > 0) {
-                    stagesTextView?.text = "📊 Stages: $stages/3 captured ✓"
-                    stagesTextView?.setTextColor(COLOR_SUCCESS)
+                // 4. Stress
+                if (st?.hasData() == true) {
+                    val avgStr = st.average?.let { "avg $it" } ?: st.range?.let { "${it.min}-${it.max}" }
+                    val catStr = st.category?.let { " ($it)" } ?: ""
+                    val str = if (avgStr != null) "$avgStr$catStr" else (st.category ?: "")
+                    stressTextView?.text = "🧠 Stress: $str ✓"
+                    stressTextView?.setTextColor(COLOR_SUCCESS)
+                } else if (data.stressLevel != null) {
+                    val catStr = data.stressCategory?.let { " ($it)" } ?: ""
+                    stressTextView?.text = "🧠 Stress: ${data.stressLevel}$catStr ✓"
+                    stressTextView?.setTextColor(COLOR_SUCCESS)
                 } else {
-                    stagesTextView?.text = "📊 Stages: —"
-                    stagesTextView?.setTextColor(COLOR_MUTED)
+                    stressTextView?.text = "🧠 Stress: —"
+                    stressTextView?.setTextColor(COLOR_MUTED)
+                }
+
+                // 5. SpO2
+                if (oxy?.hasData() == true) {
+                    val avgStr = oxy.average?.let { "avg $it%" } ?: oxy.range?.let { "${it.min}-${it.max}%" } ?: oxy.averageSleep?.let { "sleep $it%" } ?: "${oxy.current}%"
+                    spo2TextView?.text = "🫁 SpO₂: $avgStr ✓"
+                    spo2TextView?.setTextColor(COLOR_SUCCESS)
+                } else {
+                    spo2TextView?.text = "🫁 SpO₂: —"
+                    spo2TextView?.setTextColor(COLOR_MUTED)
                 }
 
                 // Highlight button if any data is ready
@@ -220,13 +251,15 @@ class LiveSyncOverlay(
         // ── Checklist Badges ─────────────────────────────────────
         stepsTextView = makeBadge("🏃 Steps: —")
         sleepTextView = makeBadge("😴 Sleep: —")
-        vitalsTextView = makeBadge("💓 Vitals: —")
-        stagesTextView = makeBadge("📊 Stages: —")
+        hrTextView = makeBadge("💓 HR: —")
+        stressTextView = makeBadge("🧠 Stress: —")
+        spo2TextView = makeBadge("🫁 SpO₂: —")
 
         rootCard.addView(stepsTextView)
         rootCard.addView(sleepTextView)
-        rootCard.addView(vitalsTextView)
-        rootCard.addView(stagesTextView)
+        rootCard.addView(hrTextView)
+        rootCard.addView(stressTextView)
+        rootCard.addView(spo2TextView)
 
         // ── Action Button ────────────────────────────────────────
         syncButton = Button(context).apply {

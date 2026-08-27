@@ -231,6 +231,9 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     // ── Assisted Live Capture state ───────────────────────────
     private val liveHomeCaptures = mutableListOf<List<String>>()
     private val liveSleepCaptures = mutableListOf<List<String>>()
+    private val liveHeartRateCaptures = mutableListOf<List<String>>()
+    private val liveStressCaptures = mutableListOf<List<String>>()
+    private val liveOxygenCaptures = mutableListOf<List<String>>()
     private var overlay: LiveSyncOverlay? = null
     private var lastLiveCaptureSignature: String? = null
 
@@ -327,6 +330,9 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         step = Step.IDLE // autonomous state machine stays idle
         liveHomeCaptures.clear()
         liveSleepCaptures.clear()
+        liveHeartRateCaptures.clear()
+        liveStressCaptures.clear()
+        liveOxygenCaptures.clear()
         lastLiveCaptureSignature = null
         _liveCapturedData.value = ParsedHealthData()
         _progress.value = SyncProgress(
@@ -360,8 +366,22 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         var changed = false
         var current = _liveCapturedData.value
 
-        // 1. Home Activity rings
-        val isHome = texts.any {
+        // 1. Sleep Detail
+        val isSleep = onSleepDetail(texts) || stillOnSleepDetail(texts)
+        if (isSleep) {
+            addCapture(liveSleepCaptures, texts)
+            val sleep = parser.parseSleepDetail(liveSleepCaptures)
+            if (sleep.hasData()) {
+                val mergedSleep = current.sleep?.merge(sleep) ?: sleep
+                if (mergedSleep != current.sleep) {
+                    current = current.copy(sleep = mergedSleep)
+                    changed = true
+                }
+            }
+        }
+
+        // 2. Home Activity rings
+        val isHome = !isSleep && texts.any {
             it.equals("steps", true) || it.equals("calories", true) ||
                     it.equals("stand", true) || it.contains("step count", true)
         }
@@ -377,15 +397,61 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             }
         }
 
-        // 2. Sleep Detail
-        val isSleep = onSleepDetail(texts) || stillOnSleepDetail(texts)
-        if (isSleep) {
-            addCapture(liveSleepCaptures, texts)
-            val sleep = parser.parseSleepDetail(liveSleepCaptures)
-            if (sleep.hasData()) {
-                val mergedSleep = current.sleep?.merge(sleep) ?: sleep
-                if (mergedSleep != current.sleep) {
-                    current = current.copy(sleep = mergedSleep)
+        // 3. Heart Rate Detail
+        val isHeartRate = !isSleep && !isHome && texts.any {
+            it.contains("resting heart rate", true) || it.contains("resting hr", true) ||
+                    (it.contains("heart rate", true) && !it.contains("sleep", true))
+        }
+        if (isHeartRate) {
+            addCapture(liveHeartRateCaptures, texts)
+            val hr = parser.parseHeartRateDetail(liveHeartRateCaptures)
+            if (hr.hasData()) {
+                val mergedHr = current.heartRate?.merge(hr) ?: hr
+                if (mergedHr != current.heartRate) {
+                    current = current.copy(
+                        heartRate = mergedHr,
+                        restingHeartRateBpm = mergedHr.restingBpm ?: current.restingHeartRateBpm,
+                        heartRateBpm = mergedHr.currentBpm ?: current.heartRateBpm
+                    )
+                    changed = true
+                }
+            }
+        }
+
+        // 4. Stress Detail
+        val isStress = !isSleep && !isHome && texts.any {
+            it.contains("stress", true) || it.contains("relaxed", true) ||
+                    it.contains("pressure", true)
+        }
+        if (isStress) {
+            addCapture(liveStressCaptures, texts)
+            val stress = parser.parseStressDetail(liveStressCaptures)
+            if (stress.hasData()) {
+                val mergedStress = current.stress?.merge(stress) ?: stress
+                if (mergedStress != current.stress) {
+                    current = current.copy(
+                        stress = mergedStress,
+                        stressLevel = mergedStress.average ?: current.stressLevel,
+                        stressCategory = mergedStress.category ?: current.stressCategory
+                    )
+                    changed = true
+                }
+            }
+        }
+
+        // 5. Oxygen Saturation (SpO₂) Detail
+        val isOxygen = !isSleep && !isHome && texts.any {
+            (it.contains("spo2", true) || it.contains("spo₂", true) ||
+                    it.contains("blood oxygen", true) || it.contains("oxygen saturation", true)) &&
+                    !it.contains("sleep", true)
+        }
+        if (isOxygen) {
+            addCapture(liveOxygenCaptures, texts)
+            val oxygen = parser.parseOxygenDetail(liveOxygenCaptures)
+            if (oxygen.hasData()) {
+                val mergedOxygen = current.oxygenSaturation?.merge(oxygen) ?: oxygen
+                if (mergedOxygen != current.oxygenSaturation) {
+                    current = current.copy(oxygenSaturation = mergedOxygen)
                     changed = true
                 }
             }

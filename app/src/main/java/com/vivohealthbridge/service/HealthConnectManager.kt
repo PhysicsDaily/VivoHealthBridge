@@ -447,38 +447,112 @@ class HealthConnectManager(private val context: Context) {
     ) {
         val now = Instant.ofEpochMilli(data.syncTimestamp)
         val offset = zone.rules.getOffset(now)
+        val today = LocalDate.now(zone)
+        val dayStart = today.atStartOfDay(zone).toInstant()
+        val dayEnd = if (now.isAfter(dayStart)) now else dayStart.plusSeconds(60)
 
-        data.heartRateBpm?.let { bpm ->
-            report.attempt("Heart rate ($bpm bpm)") {
+        // ── Heart Rate ──────────────────────────────────────────
+        data.heartRate?.range?.let { hrRange ->
+            val early = dayStart.fraction(0.33, dayEnd)
+            val late = dayStart.fraction(0.67, dayEnd)
+            report.attempt("Daily heart rate (${hrRange.min}–${hrRange.max} bpm)") {
                 client.insert(
                     HeartRateRecord(
-                        startTime = now,
-                        startZoneOffset = offset,
-                        endTime = now.plusSeconds(1),
-                        endZoneOffset = offset,
-                        samples = listOf(HeartRateRecord.Sample(now, bpm.toLong())),
-                        metadata = meta("hr-${data.syncTimestamp}", data.syncTimestamp),
+                        startTime = early,
+                        startZoneOffset = zone.rules.getOffset(early),
+                        endTime = late,
+                        endZoneOffset = zone.rules.getOffset(late),
+                        samples = listOf(
+                            HeartRateRecord.Sample(early, hrRange.min.toLong()),
+                            HeartRateRecord.Sample(late, hrRange.max.toLong()),
+                        ),
+                        metadata = meta("daily-hr-$today", data.syncTimestamp),
                     )
                 )
             }
         }
-        data.restingHeartRateBpm?.let { bpm ->
+
+        val restingBpm = data.heartRate?.restingBpm ?: data.restingHeartRateBpm
+        restingBpm?.let { bpm ->
             report.attempt("Resting heart rate ($bpm bpm)") {
                 client.insert(
                     RestingHeartRateRecord(
                         time = now,
                         zoneOffset = offset,
                         beatsPerMinute = bpm.toLong(),
-                        metadata = meta("rhr-${data.syncTimestamp}", data.syncTimestamp),
+                        metadata = meta("rhr-$today", data.syncTimestamp),
                     )
                 )
             }
         }
-        data.oxygenSaturation?.let { percent ->
-            report.attempt("SpO2 ($percent %)") {
-                client.insert(oxygen(percent, now, zone, "spo2-${data.syncTimestamp}", data.syncTimestamp))
+
+        val singleBpm = data.heartRate?.currentBpm ?: data.heartRateBpm
+        if (singleBpm != null && data.heartRate?.range == null) {
+            report.attempt("Heart rate ($singleBpm bpm)") {
+                client.insert(
+                    HeartRateRecord(
+                        startTime = now,
+                        startZoneOffset = offset,
+                        endTime = now.plusSeconds(1),
+                        endZoneOffset = offset,
+                        samples = listOf(HeartRateRecord.Sample(now, singleBpm.toLong())),
+                        metadata = meta("hr-${data.syncTimestamp}", data.syncTimestamp),
+                    )
+                )
             }
         }
+
+        // ── Oxygen Saturation (SpO₂) ─────────────────────────────
+        data.oxygenSaturation?.range?.let { spo2Range ->
+            val early = dayStart.fraction(0.33, dayEnd)
+            val late = dayStart.fraction(0.67, dayEnd)
+            report.attempt("Daily SpO2 range (${spo2Range.min}–${spo2Range.max} %)") {
+                client.insert(
+                    listOf(
+                        oxygen(spo2Range.min, early, zone, "daily-spo2-min-$today", data.syncTimestamp),
+                        oxygen(spo2Range.max, late, zone, "daily-spo2-max-$today", data.syncTimestamp),
+                    )
+                )
+            }
+        }
+
+        data.oxygenSaturation?.average?.let { avg ->
+            report.attempt("Average daily SpO2 ($avg %)") {
+                client.insert(oxygen(avg, now, zone, "daily-spo2-avg-$today", data.syncTimestamp))
+            }
+        }
+
+        data.oxygenSaturation?.averageSleep?.let { avgSleep ->
+            if (data.sleep?.averageSpo2 == null) {
+                report.attempt("Average sleep SpO2 ($avgSleep %)") {
+                    client.insert(oxygen(avgSleep, now, zone, "sleep-spo2-avg-$today", data.syncTimestamp))
+                }
+            }
+        }
+
+        data.oxygenSaturation?.current?.let { percent ->
+            if (data.oxygenSaturation.average == null && data.oxygenSaturation.range == null) {
+                report.attempt("SpO2 ($percent %)") {
+                    client.insert(oxygen(percent, now, zone, "spo2-${data.syncTimestamp}", data.syncTimestamp))
+                }
+            }
+        }
+
+        // ── Stress (unsupported in Health Connect) ────────────────
+        data.stress?.let { st ->
+            val desc = listOfNotNull(
+                st.average?.let { "avg $it" },
+                st.range?.let { "range ${it.min}–${it.max}" },
+                st.category
+            ).joinToString(", ")
+            report.skip("Stress ($desc — Health Connect has no stress record type)")
+        } ?: run {
+            data.stressLevel?.let {
+                report.skip("Stress ($it — Health Connect has no stress record type)")
+            }
+        }
+
+        // ── Weight ───────────────────────────────────────────────
         data.weightKg?.let { kg ->
             report.attempt("Weight ($kg kg)") {
                 client.insert(
@@ -486,13 +560,10 @@ class HealthConnectManager(private val context: Context) {
                         time = now,
                         zoneOffset = offset,
                         weight = Mass.kilograms(kg.toDouble()),
-                        metadata = meta("weight-${LocalDate.now(zone)}", data.syncTimestamp),
+                        metadata = meta("weight-$today", data.syncTimestamp),
                     )
                 )
             }
-        }
-        data.stressLevel?.let {
-            report.skip("Stress ($it — Health Connect has no stress record type)")
         }
     }
 

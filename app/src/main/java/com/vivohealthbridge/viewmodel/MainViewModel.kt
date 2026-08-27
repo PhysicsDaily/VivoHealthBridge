@@ -326,19 +326,49 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        data.heartRateBpm?.let {
-            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "$it bpm", ok)
+        data.heartRate?.let { hr ->
+            val parts = mutableListOf<String>()
+            hr.range?.let { parts.add(it.format("bpm")) }
+            hr.restingBpm?.let { parts.add("resting $it bpm") }
+            hr.currentBpm?.let { parts.add("current $it bpm") }
+            if (parts.isNotEmpty()) {
+                syncRepository.logSync(HealthMetricType.HEART_RATE.name, parts.joinToString(" · "), ok)
+            }
+        } ?: run {
+            data.heartRateBpm?.let {
+                syncRepository.logSync(HealthMetricType.HEART_RATE.name, "$it bpm", ok)
+            }
+            data.restingHeartRateBpm?.let {
+                syncRepository.logSync(HealthMetricType.HEART_RATE.name, "resting $it bpm", ok)
+            }
         }
-        data.restingHeartRateBpm?.let {
-            syncRepository.logSync(HealthMetricType.HEART_RATE.name, "resting $it bpm", ok)
+
+        data.stress?.let { st ->
+            val parts = mutableListOf<String>()
+            st.average?.let { parts.add("avg $it") }
+            st.range?.let { parts.add("range ${it.min}–${it.max}") }
+            st.category?.let { parts.add(it) }
+            if (parts.isNotEmpty()) {
+                syncRepository.logSync(HealthMetricType.STRESS.name, parts.joinToString(" · "), local)
+            }
+        } ?: run {
+            data.stressLevel?.let {
+                val category = data.stressCategory?.let { c -> " $c" } ?: ""
+                syncRepository.logSync(HealthMetricType.STRESS.name, "$it$category", local)
+            }
         }
-        data.oxygenSaturation?.let {
-            syncRepository.logSync(HealthMetricType.SPO2.name, "$it%", ok)
+
+        data.oxygenSaturation?.let { oxy ->
+            val parts = mutableListOf<String>()
+            oxy.range?.let { parts.add(it.format("%")) }
+            oxy.average?.let { parts.add("avg $it%") }
+            oxy.averageSleep?.let { parts.add("sleep avg $it%") }
+            oxy.current?.let { parts.add("$it%") }
+            if (parts.isNotEmpty()) {
+                syncRepository.logSync(HealthMetricType.SPO2.name, parts.joinToString(" · "), ok)
+            }
         }
-        data.stressLevel?.let {
-            val category = data.stressCategory?.let { c -> " $c" } ?: ""
-            syncRepository.logSync(HealthMetricType.STRESS.name, "$it$category", local)
-        }
+
         data.weightKg?.let {
             syncRepository.logSync(HealthMetricType.WEIGHT.name, "$it kg", ok)
         }

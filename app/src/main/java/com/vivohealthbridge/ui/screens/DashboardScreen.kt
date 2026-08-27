@@ -252,21 +252,59 @@ fun DashboardScreen(
                         sleepCards(sleep)
                     }
 
-                    // ══ Single metrics (manual entry) ══════════════════════
-                    data.heartRateBpm?.let { hr ->
+                    // ══ Heart Rate (standalone) ══════════════════════════
+                    data.heartRate?.takeIf { it.hasData() }?.let { hr ->
+                        item {
+                            MetricCard(
+                                emoji = "❤️",
+                                title = "Heart Rate",
+                                value = hr.range?.format("bpm") ?: "${hr.currentBpm ?: hr.restingBpm} bpm",
+                                subtitle = listOfNotNull(
+                                    hr.restingBpm?.let { "Resting: $it bpm" },
+                                    hr.currentBpm?.takeIf { hr.range != null }?.let { "Current: $it bpm" }
+                                ).joinToString(" · ").ifBlank { null }
+                            )
+                        }
+                    } ?: data.heartRateBpm?.let { hr ->
                         item {
                             MetricCard(
                                 emoji = "❤️",
                                 title = "Heart Rate",
                                 value = "$hr bpm",
-                                subtitle = data.restingHeartRateBpm?.let { "Resting: $it" }
+                                subtitle = data.restingHeartRateBpm?.let { "Resting: $it bpm" }
                             )
                         }
                     }
-                    data.oxygenSaturation?.let {
-                        item { MetricCard(emoji = "🫁", title = "SpO₂", value = "$it%") }
+
+                    // ══ SpO2 (standalone) ═════════════════════════════════
+                    data.oxygenSaturation?.takeIf { it.hasData() }?.let { oxy ->
+                        item {
+                            MetricCard(
+                                emoji = "🫁",
+                                title = "SpO₂",
+                                value = oxy.average?.let { "$it%" } ?: oxy.range?.format("%") ?: "${oxy.current ?: oxy.averageSleep}%",
+                                subtitle = listOfNotNull(
+                                    oxy.range?.takeIf { oxy.average != null }?.format("%"),
+                                    oxy.averageSleep?.let { "Sleep avg: $it%" }
+                                ).joinToString(" · ").ifBlank { null }
+                            )
+                        }
                     }
-                    data.stressLevel?.let {
+
+                    // ══ Stress (standalone) ═══════════════════════════════
+                    data.stress?.takeIf { it.hasData() }?.let { st ->
+                        item {
+                            MetricCard(
+                                emoji = "🧠",
+                                title = "Stress",
+                                value = st.average?.toString() ?: st.range?.format() ?: st.category ?: "—",
+                                subtitle = listOfNotNull(
+                                    st.category,
+                                    st.range?.takeIf { st.average != null }?.let { "Range: ${it.min}–${it.max}" }
+                                ).joinToString(" · ").ifBlank { null }
+                            )
+                        }
+                    } ?: data.stressLevel?.let {
                         item {
                             MetricCard(
                                 emoji = "🧠",
@@ -276,6 +314,8 @@ fun DashboardScreen(
                             )
                         }
                     }
+
+                    // ══ Weight ════════════════════════════════════════════
                     data.weightKg?.let {
                         item { MetricCard(emoji = "⚖️", title = "Weight", value = "$it kg") }
                     }
