@@ -34,6 +34,7 @@ data class SyncProgress(
  *  WAIT_APP      Vivo Health reaches the foreground
  *  SYNC_GESTURE  scroll to the top, pull down and release to trigger a sync
  *  SYNC_WAIT     "Syncing…" → "Sync complete"                      (~20 s)
+ *  SYNC_WAIT     wait 10 s for watch to synchronize
  *  HOME_COLLECT  scroll to the top, read Steps/Exercise/Calories/Stand
  *  OPEN_SLEEP    tap the Sleep card
  *  SLEEP_LOAD    the detail screen renders                         (~15–20 s)
@@ -109,6 +110,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         private const val WAIT_APP_MS = 15_000L
         private const val SYNC_WAIT_MS = 40_000L
         private const val SYNC_PROBE_MS = 8_000L      // no sync sign by now → pull again
+        private const val SYNC_WAIT_MS = 10_000L      // wait 10s after pulling down
         private const val HOME_COLLECT_MS = 15_000L
         private const val OPEN_SLEEP_MS = 15_000L
         private const val SLEEP_LOAD_MS = 40_000L
@@ -330,6 +332,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             Step.WAIT_APP -> waitForApp(root, timedOut)
             Step.SYNC_GESTURE -> pullToSync(root, bounds)
             Step.SYNC_WAIT -> waitForSync(texts, timedOut)
+            Step.SYNC_WAIT -> waitForSync(timedOut)
             Step.HOME_COLLECT -> collectHome(root, texts, timedOut)
             Step.OPEN_SLEEP -> openSleep(root, bounds, texts, timedOut)
             Step.SLEEP_LOAD -> waitForSleep(texts, timedOut)
@@ -376,15 +379,20 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         // A later attempt pulls further, in case the refresh threshold is deeper
         // than the first pull reached.
         val reach = if (syncPulls == 0) 0.60f else 0.74f
+        val reach = 0.65f
         drag(bounds, midX, from, midX, bounds.top + bounds.height() * reach, durationMs = 320L)
         syncPulls++
 
         goTo(Step.SYNC_WAIT, SYNC_WAIT_MS)
+        goTo(Step.SYNC_WAIT, SYNC_WAIT_MS, "10s remaining")
         pause(1_500L)
     }
 
     private fun waitForSync(texts: List<String>, timedOut: Boolean) {
         val blob = texts.joinToString(" | ").lowercase()
+    private fun waitForSync(timedOut: Boolean) {
+        val remainingSec = (((stepDeadline - now()) + 999) / 1000).coerceAtLeast(0)
+        publish("${remainingSec}s remaining")
 
         if (!sawSyncing && (blob.contains("syncing") || blob.contains("synchronizing") ||
                     blob.contains("synchronising"))
@@ -416,6 +424,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             // Whatever is on screen is what the watch last delivered; read it.
             Log.w(TAG, "sync wait timed out (sawSyncing=$sawSyncing) – reading anyway")
             beginHomeCollect("Sync timed out, reading cached data")
+            Log.d(TAG, "sync wait finished (10s) – collecting home activity")
+            beginHomeCollect("Sync wait complete")
         }
     }
 
