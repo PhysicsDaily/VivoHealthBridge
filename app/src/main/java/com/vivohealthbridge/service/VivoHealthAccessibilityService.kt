@@ -105,6 +105,17 @@ class VivoHealthAccessibilityService : AccessibilityService() {
          * from the home list.
          */
         private val HOME_TAB_ONLY = listOf("steps", "step count", "calories", "stand")
+
+        /**
+         * Cards from the *lower* half of the home tab. When the tab is scrolled
+         * down far enough to show Heart rate / Stress / Oxygen saturation, the
+         * activity-ring labels ("Steps", "Calories", "Stand") are no longer in
+         * the tree — without these markers that state would match nothing and
+         * the metric cards would never be read.
+         */
+        private val HOME_CARD_MARKERS = listOf(
+            "health care", "activity recommendation", "view ecg",
+        )
     }
 
     private val parser = VivoHealthParser()
@@ -246,10 +257,19 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
 
         // 2. Home Activity rings & Home Cards (Heart rate, Stress, Oxygen, Weight)
-        val isHome = !isSleep && texts.any {
-            it.equals("steps", true) || it.equals("calories", true) ||
-                    it.equals("stand", true) || it.contains("step count", true)
-        }
+        val homeBlob = texts.joinToString(" | ").lowercase()
+        val isHome = !isSleep && (
+                texts.any {
+                    it.equals("steps", true) || it.equals("calories", true) ||
+                            it.equals("stand", true) || it.contains("step count", true)
+                } ||
+                        HOME_CARD_MARKERS.any { homeBlob.contains(it) } ||
+                        // Several metric cards visible at once only happens on the
+                        // home tab — each standalone detail screen shows one metric.
+                        (homeBlob.contains("heart rate") &&
+                                homeBlob.contains("oxygen saturation") &&
+                                homeBlob.contains("stress"))
+                )
         if (isHome) {
             addCapture(liveHomeCaptures, texts)
             val act = parser.parseHomeActivity(liveHomeCaptures)

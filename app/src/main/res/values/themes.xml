@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.VivoHealthBridge" parent="android:Theme.Material.NoActionBar">
-        <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/transparent</item>
+    <!--
+      Base (light) theme. The window background matches the Compose light
+      surface so there is no white/black flash between inflation and the
+      first composed frame, and no mismatch on activities that never compose
+      (PermissionsRationaleActivity).
+    -->
+    <style name="Theme.VivoHealthBridge" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background_light</item>
+        <item name="android:statusBarColor">@color/window_background_light</item>
+        <item name="android:navigationBarColor">@color/window_background_light</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>
