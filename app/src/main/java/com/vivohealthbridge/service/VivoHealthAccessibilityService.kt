@@ -381,6 +381,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
 
         // 2. Home Activity rings
+        // 2. Home Activity rings & Home Cards (Heart rate, Stress, Oxygen, Weight)
         val isHome = !isSleep && texts.any {
             it.equals("steps", true) || it.equals("calories", true) ||
                     it.equals("stand", true) || it.contains("step count", true)
@@ -392,6 +393,14 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                 val mergedAct = current.activity?.merge(act) ?: act
                 if (mergedAct != current.activity) {
                     current = current.copy(activity = mergedAct)
+                    changed = true
+                }
+            }
+            val homeCards = parser.parseHomeCards(liveHomeCaptures)
+            if (homeCards.hasAnyData()) {
+                val merged = current.merge(homeCards)
+                if (merged != current) {
+                    current = merged
                     changed = true
                 }
             }
@@ -432,6 +441,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                     current = current.copy(
                         stress = mergedStress,
                         stressLevel = mergedStress.average ?: current.stressLevel,
+                        stressLevel = mergedStress.current ?: mergedStress.average ?: current.stressLevel,
                         stressCategory = mergedStress.category ?: current.stressCategory
                     )
                     changed = true
@@ -972,6 +982,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         val activity = if (homeCaptures.isEmpty()) null else parser.parseHomeActivity(homeCaptures)
         val sleep = if (sleepCaptures.isEmpty()) null else parser.parseSleepDetail(sleepCaptures)
+        val homeCards = if (homeCaptures.isEmpty()) null else parser.parseHomeCards(homeCaptures)
 
         if (Log.isLoggable(TAG, Log.DEBUG)) {
             homeCaptures.forEachIndexed { i, c -> Log.d(TAG, "home[$i] = $c") }
@@ -979,11 +990,16 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
         Log.d(TAG, "activity = $activity")
         Log.d(TAG, "sleep = $sleep")
+        Log.d(TAG, "homeCards = $homeCards")
 
         val parsed = ParsedHealthData(
+        var parsed = ParsedHealthData(
             activity = activity?.takeIf { it.hasData() },
             sleep = sleep?.takeIf { it.hasData() },
         )
+        if (homeCards?.hasAnyData() == true) {
+            parsed = parsed.merge(homeCards)
+        }
 
         step = Step.IDLE
         _progress.value = SyncProgress(

@@ -254,6 +254,15 @@ fun DashboardScreen(
 
                     // ══ Heart Rate (standalone) ══════════════════════════
                     data.heartRate?.takeIf { it.hasData() }?.let { hr ->
+                        val mainVal = hr.currentBpm?.let { "$it bpm" }
+                            ?: hr.range?.format("bpm")
+                            ?: "${hr.restingBpm ?: hr.walkingBpm ?: hr.sleepingBpm} bpm"
+                        val details = listOfNotNull(
+                            hr.range?.takeIf { hr.currentBpm != null }?.let { "Range: ${it.format("bpm")}" },
+                            hr.restingBpm?.let { "Resting: $it bpm" },
+                            hr.walkingBpm?.let { "Walking: $it bpm" },
+                            hr.sleepingBpm?.let { "Sleeping: $it bpm" },
+                        ).joinToString(" · ").ifBlank { null }
                         item {
                             MetricCard(
                                 emoji = "❤️",
@@ -263,6 +272,8 @@ fun DashboardScreen(
                                     hr.restingBpm?.let { "Resting: $it bpm" },
                                     hr.currentBpm?.takeIf { hr.range != null }?.let { "Current: $it bpm" }
                                 ).joinToString(" · ").ifBlank { null }
+                                value = mainVal,
+                                subtitle = details
                             )
                         }
                     } ?: data.heartRateBpm?.let { hr ->
@@ -278,6 +289,15 @@ fun DashboardScreen(
 
                     // ══ SpO2 (standalone) ═════════════════════════════════
                     data.oxygenSaturation?.takeIf { it.hasData() }?.let { oxy ->
+                        val mainVal = oxy.current?.let { "$it%" }
+                            ?: oxy.average?.let { "$it%" }
+                            ?: oxy.range?.format("%")
+                            ?: "${oxy.averageSleep}%"
+                        val details = listOfNotNull(
+                            oxy.average?.takeIf { oxy.current != null }?.let { "Avg: $it%" },
+                            oxy.range?.let { "Range: ${it.format("%")}" },
+                            oxy.averageSleep?.let { "Sleep avg: $it%" }
+                        ).joinToString(" · ").ifBlank { null }
                         item {
                             MetricCard(
                                 emoji = "🫁",
@@ -287,12 +307,23 @@ fun DashboardScreen(
                                     oxy.range?.takeIf { oxy.average != null }?.format("%"),
                                     oxy.averageSleep?.let { "Sleep avg: $it%" }
                                 ).joinToString(" · ").ifBlank { null }
+                                value = mainVal,
+                                subtitle = details
                             )
                         }
                     }
 
                     // ══ Stress (standalone) ═══════════════════════════════
                     data.stress?.takeIf { it.hasData() }?.let { st ->
+                        val mainVal = st.current?.let { "$it${st.category?.let { c -> " ($c)" } ?: ""}" }
+                            ?: st.average?.let { "$it${st.category?.let { c -> " ($c)" } ?: ""}" }
+                            ?: st.range?.format()
+                            ?: st.category
+                            ?: "—"
+                        val details = listOfNotNull(
+                            st.average?.takeIf { st.current != null }?.let { "Avg: $it" },
+                            st.range?.let { "Range: ${it.min}–${it.max}" }
+                        ).joinToString(" · ").ifBlank { null }
                         item {
                             MetricCard(
                                 emoji = "🧠",
@@ -302,6 +333,8 @@ fun DashboardScreen(
                                     st.category,
                                     st.range?.takeIf { st.average != null }?.let { "Range: ${it.min}–${it.max}" }
                                 ).joinToString(" · ").ifBlank { null }
+                                value = mainVal,
+                                subtitle = details
                             )
                         }
                     } ?: data.stressLevel?.let {

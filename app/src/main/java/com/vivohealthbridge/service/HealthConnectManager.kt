@@ -489,6 +489,8 @@ class HealthConnectManager(private val context: Context) {
         val singleBpm = data.heartRate?.currentBpm ?: data.heartRateBpm
         if (singleBpm != null && data.heartRate?.range == null) {
             report.attempt("Heart rate ($singleBpm bpm)") {
+        if (singleBpm != null) {
+            report.attempt("Current heart rate ($singleBpm bpm)") {
                 client.insert(
                     HeartRateRecord(
                         startTime = now,
@@ -497,9 +499,18 @@ class HealthConnectManager(private val context: Context) {
                         endZoneOffset = offset,
                         samples = listOf(HeartRateRecord.Sample(now, singleBpm.toLong())),
                         metadata = meta("hr-${data.syncTimestamp}", data.syncTimestamp),
+                        metadata = meta("current-hr-$today", data.syncTimestamp),
                     )
                 )
             }
+        }
+
+        data.heartRate?.walkingBpm?.let { walkBpm ->
+            report.skip("Average walking heart rate ($walkBpm bpm — kept in app history)")
+        }
+
+        data.heartRate?.sleepingBpm?.let { sleepBpm ->
+            report.skip("Normal sleeping heart rate ($sleepBpm bpm — kept in app history)")
         }
 
         // ── Oxygen Saturation (SpO₂) ─────────────────────────────
@@ -535,12 +546,15 @@ class HealthConnectManager(private val context: Context) {
                 report.attempt("SpO2 ($percent %)") {
                     client.insert(oxygen(percent, now, zone, "spo2-${data.syncTimestamp}", data.syncTimestamp))
                 }
+            report.attempt("Current SpO2 ($percent %)") {
+                client.insert(oxygen(percent, now, zone, "current-spo2-$today", data.syncTimestamp))
             }
         }
 
         // ── Stress (unsupported in Health Connect) ────────────────
         data.stress?.let { st ->
             val desc = listOfNotNull(
+                st.current?.let { "current $it" },
                 st.average?.let { "avg $it" },
                 st.range?.let { "range ${it.min}–${it.max}" },
                 st.category
