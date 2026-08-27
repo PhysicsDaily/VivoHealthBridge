@@ -114,7 +114,6 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val walk = walkingBpm.toIntOrNull()
                     val sleep = sleepingBpm.toIntOrNull()
                     val data = ParsedHealthData(
-                        heartRate = HeartRateDetail(range = range, restingBpm = rest, currentBpm = curr),
                         heartRate = HeartRateDetail(
                             range = range,
                             restingBpm = rest,
@@ -127,10 +126,8 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "Heart rate synced!"
-                    minBpm = ""; maxBpm = ""; restingBpm = ""; currentBpm = ""
                     minBpm = ""; maxBpm = ""; restingBpm = ""; currentBpm = ""; walkingBpm = ""; sleepingBpm = ""
                 },
-                enabled = (minBpm.isNotEmpty() && maxBpm.isNotEmpty()) || restingBpm.isNotEmpty() || currentBpm.isNotEmpty(),
                 enabled = (minBpm.isNotEmpty() && maxBpm.isNotEmpty()) || restingBpm.isNotEmpty() || currentBpm.isNotEmpty() || walkingBpm.isNotEmpty() || sleepingBpm.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save Heart Rate") }
@@ -360,16 +357,13 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                             range = range,
                             average = avg,
                             averageSleep = sleepAvg,
-                            current = avg ?: max ?: min
                             current = curr
                         )
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "SpO2 synced!"
-                    spo2Min = ""; spo2Max = ""; avgSpo2 = ""; sleepAvgSpo2 = ""
                     spo2Min = ""; spo2Max = ""; avgSpo2 = ""; sleepAvgSpo2 = ""; currentSpo2 = ""
                 },
-                enabled = (spo2Min.isNotEmpty() && spo2Max.isNotEmpty()) || avgSpo2.isNotEmpty() || sleepAvgSpo2.isNotEmpty(),
                 enabled = (spo2Min.isNotEmpty() && spo2Max.isNotEmpty()) || avgSpo2.isNotEmpty() || sleepAvgSpo2.isNotEmpty() || currentSpo2.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save SpO2") }
@@ -402,10 +396,6 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             val curr = currentStress.toIntOrNull()
             val refScore = curr ?: avg
             val autoCat = when {
-                avg == null -> ""
-                avg in 1..33 -> "Relaxed"
-                avg in 34..66 -> "Moderate"
-                avg in 67..100 -> "High"
                 refScore == null -> ""
                 refScore in 1..33 -> "Relaxed"
                 refScore in 34..66 -> "Moderate"
@@ -420,9 +410,6 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
                 OutlinedTextField(
-                    value = customCategory, onValueChange = { customCategory = it },
-                    label = { Text("Category") }, placeholder = { if (autoCat.isNotEmpty()) Text(autoCat) },
-                    modifier = Modifier.weight(1f), singleLine = true
                     value = currentStress, onValueChange = { currentStress = it.filter { c -> c.isDigit() } },
                     label = { Text("Current Stress") }, modifier = Modifier.weight(1f), singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
@@ -444,18 +431,14 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val range = if (min != null && max != null) MetricRange(min, max) else null
                     val cat = customCategory.ifBlank { autoCat.ifBlank { null } }
                     val data = ParsedHealthData(
-                        stress = StressDetail(range = range, average = avg, category = cat),
-                        stressLevel = avg ?: max ?: min,
                         stress = StressDetail(range = range, average = avg, category = cat, current = curr),
                         stressLevel = curr ?: avg ?: max ?: min,
                         stressCategory = cat
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "Stress synced!"
-                    stressMin = ""; stressMax = ""; avgStress = ""; customCategory = ""
                     stressMin = ""; stressMax = ""; avgStress = ""; currentStress = ""; customCategory = ""
                 },
-                enabled = (stressMin.isNotEmpty() && stressMax.isNotEmpty()) || avgStress.isNotEmpty(),
                 enabled = (stressMin.isNotEmpty() && stressMax.isNotEmpty()) || avgStress.isNotEmpty() || currentStress.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save Stress") }

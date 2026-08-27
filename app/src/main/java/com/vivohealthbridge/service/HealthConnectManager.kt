@@ -487,8 +487,6 @@ class HealthConnectManager(private val context: Context) {
         }
 
         val singleBpm = data.heartRate?.currentBpm ?: data.heartRateBpm
-        if (singleBpm != null && data.heartRate?.range == null) {
-            report.attempt("Heart rate ($singleBpm bpm)") {
         if (singleBpm != null) {
             report.attempt("Current heart rate ($singleBpm bpm)") {
                 client.insert(
@@ -498,7 +496,6 @@ class HealthConnectManager(private val context: Context) {
                         endTime = now.plusSeconds(1),
                         endZoneOffset = offset,
                         samples = listOf(HeartRateRecord.Sample(now, singleBpm.toLong())),
-                        metadata = meta("hr-${data.syncTimestamp}", data.syncTimestamp),
                         metadata = meta("current-hr-$today", data.syncTimestamp),
                     )
                 )
@@ -542,10 +539,6 @@ class HealthConnectManager(private val context: Context) {
         }
 
         data.oxygenSaturation?.current?.let { percent ->
-            if (data.oxygenSaturation.average == null && data.oxygenSaturation.range == null) {
-                report.attempt("SpO2 ($percent %)") {
-                    client.insert(oxygen(percent, now, zone, "spo2-${data.syncTimestamp}", data.syncTimestamp))
-                }
             report.attempt("Current SpO2 ($percent %)") {
                 client.insert(oxygen(percent, now, zone, "current-spo2-$today", data.syncTimestamp))
             }

@@ -331,7 +331,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             hr.currentBpm?.let { parts.add("current $it bpm") }
             hr.range?.let { parts.add(it.format("bpm")) }
             hr.restingBpm?.let { parts.add("resting $it bpm") }
-            hr.currentBpm?.let { parts.add("current $it bpm") }
             hr.walkingBpm?.let { parts.add("walking $it bpm") }
             hr.sleepingBpm?.let { parts.add("sleeping $it bpm") }
             if (parts.isNotEmpty()) {
@@ -367,9 +366,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             oxy.current?.let { parts.add("current $it%") }
             oxy.average?.let { parts.add("avg $it%") }
             oxy.range?.let { parts.add(it.format("%")) }
-            oxy.average?.let { parts.add("avg $it%") }
             oxy.averageSleep?.let { parts.add("sleep avg $it%") }
-            oxy.current?.let { parts.add("$it%") }
             if (parts.isNotEmpty()) {
                 syncRepository.logSync(HealthMetricType.SPO2.name, parts.joinToString(" · "), ok)
             }

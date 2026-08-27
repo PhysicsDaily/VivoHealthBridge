@@ -440,7 +440,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
                 if (mergedStress != current.stress) {
                     current = current.copy(
                         stress = mergedStress,
-                        stressLevel = mergedStress.average ?: current.stressLevel,
                         stressLevel = mergedStress.current ?: mergedStress.average ?: current.stressLevel,
                         stressCategory = mergedStress.category ?: current.stressCategory
                     )
@@ -992,7 +991,6 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         Log.d(TAG, "sleep = $sleep")
         Log.d(TAG, "homeCards = $homeCards")
 
-        val parsed = ParsedHealthData(
         var parsed = ParsedHealthData(
             activity = activity?.takeIf { it.hasData() },
             sleep = sleep?.takeIf { it.hasData() },
