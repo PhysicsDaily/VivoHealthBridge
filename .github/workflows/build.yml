@@ -21,20 +21,20 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Setup Gradle 8.7
+      - name: Setup Gradle
+        # No gradle-version here on purpose: the wrapper already pins 8.7, so
+        # asking for a distribution as well downloaded Gradle twice per run.
         uses: gradle/actions/setup-gradle@v3
         with:
-          gradle-version: '8.7'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Ensure Gradle wrapper exists
-        run: |
-          if [ ! -f "./gradlew" ]; then
-            gradle wrapper --gradle-version 8.7 --distribution-type bin
-          fi
-          chmod +x ./gradlew
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./gradlew
 
-      - name: Run parser unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+      - name: Test and build
+        # One invocation: configuration, the daemon and the Kotlin compile
+        # classpath are all shared instead of paid for twice.
+        run: ./gradlew testDebugUnitTest assembleDebug --build-cache --stacktrace
 
       - name: Upload test report
         if: always()
@@ -44,9 +44,6 @@ jobs:
           path: app/build/reports/tests/testDebugUnitTest
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Build with Gradle
-        run: ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4

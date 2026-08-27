@@ -32,7 +32,7 @@ data class SyncProgress(
  *
  * ```
  *  WAIT_APP      Vivo Health reaches the foreground
- *  SYNC_GESTURE  drag the top of the list to trigger a watch sync
+ *  SYNC_GESTURE  scroll to the top, pull down and release to trigger a sync
  *  SYNC_WAIT     "Syncing…" → "Sync complete"                      (~20 s)
  *  HOME_COLLECT  scroll to the top, read Steps/Exercise/Calories/Stand
  *  OPEN_SLEEP    tap the Sleep card
@@ -49,6 +49,13 @@ data class SyncProgress(
  * self-scheduling [tick] runs every [TICK_MS], every step carries its own
  * deadline, and [WATCHDOG_MS] guarantees the run always ends — with partial data
  * if need be, never with a spinner that never stops.
+ *
+ * ## Where gestures are allowed to land
+ * Only inside the content band ([TOP_SAFE]…[BOTTOM_SAFE], inset from the side
+ * edges by [EDGE_SAFE]). The strip above holds the toolbar and its back arrow,
+ * the strip below is the navigation bar and the system gesture area, and the
+ * side edges are the back gesture — a swipe that strays into any of them
+ * navigates away instead of scrolling.
  */
 class VivoHealthAccessibilityService : AccessibilityService() {
 
@@ -101,24 +108,55 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         private const val WAIT_APP_MS = 15_000L
         private const val SYNC_WAIT_MS = 40_000L
-        private const val SYNC_PROBE_MS = 8_000L      // no sync sign by now → try the other direction
+        private const val SYNC_PROBE_MS = 8_000L      // no sync sign by now → pull again
         private const val HOME_COLLECT_MS = 15_000L
         private const val OPEN_SLEEP_MS = 15_000L
         private const val SLEEP_LOAD_MS = 40_000L
         private const val SLEEP_CARDS_MS = 40_000L
         private const val SLEEP_SCROLL_MS = 45_000L
 
+        private const val MAX_SYNC_PULLS = 3
         private const val MAX_CARD_SWIPES = 6
         private const val MAX_ANALYSIS_SCROLLS = 10
         private const val MAX_TOP_SCROLLS = 4
+        private const val MAX_SLEEP_OPENS = 3
         private const val MAX_NODES = 400
         private const val MAX_DEPTH = 40
+
+        // ── Where a gesture may land, as a fraction of the window ──
+        private const val TOP_SAFE = 0.14f      // above: toolbar, back arrow, tabs
+        private const val BOTTOM_SAFE = 0.86f   // below: nav bar / gesture strip
+        private const val EDGE_SAFE = 0.12f     // sides: system back gesture
+
+        /** Any one of these on screen means we are on the sleep detail page. */
+        private val SLEEP_MARKERS = listOf(
+            "total sleep duration", "compared to last", "sleep heart rate",
+            "more analysis", "sleep hrv", "sleep spo",
+        )
+
+        /**
+         * Labels that begin with "Sleep" but are not the home screen's Sleep
+         * card — the tiles and headings on the detail page itself. Tapping one
+         * of these opens a sub-screen, or walks up into the toolbar and presses
+         * back, which is how a retry used to bounce us out of Sleep entirely.
+         */
+        private val NOT_THE_SLEEP_CARD = listOf(
+            "heart rate", "hrv", "spo", "respiratory", "breath", "score",
+            "analysis", "stage", "efficiency",
+        )
+
+        /**
+         * Text only the home tab shows. The sleep detail page mentions "sleep"
+         * all the way down, so this is what tells "scrolled to the bottom of
+         * Sleep" apart from "we are back on the home list".
+         */
+        private val HOME_TAB_ONLY = listOf("steps", "step count", "calories", "stand")
     }
 
     private enum class Step(val label: String, val percent: Int) {
         IDLE("Idle", 0),
         WAIT_APP("Opening Vivo Health…", 5),
-        SYNC_GESTURE("Pulling to sync…", 12),
+        SYNC_GESTURE("Pulling down to sync…", 12),
         SYNC_WAIT("Syncing with watch…", 20),
         HOME_COLLECT("Reading activity rings…", 40),
         OPEN_SLEEP("Opening Sleep…", 50),
@@ -140,8 +178,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private val homeCaptures = mutableListOf<List<String>>()
     private val sleepCaptures = mutableListOf<List<String>>()
 
-    private var pulledDown = false
-    private var pulledUp = false
+    private var syncPulls = 0
     private var sawSyncing = false
     private var topScrollsLeft = 0
     private var cardSwipes = 0
@@ -151,7 +188,10 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private var lastScrollSignature: String? = null
     private var unchangedScrolls = 0
     private var sleepOpenAttempts = 0
-    private var sleepLoadAttempts = 0
+
+    /** Every re-entry into [Step.OPEN_SLEEP], however we got sent back there. */
+    private var sleepReopens = 0
+    private var offSleepStrikes = 0
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -207,8 +247,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private fun beginRun() {
         homeCaptures.clear()
         sleepCaptures.clear()
-        pulledDown = false
-        pulledUp = false
+        syncPulls = 0
         sawSyncing = false
         topScrollsLeft = MAX_TOP_SCROLLS
         cardSwipes = 0
@@ -218,7 +257,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         lastScrollSignature = null
         unchangedScrolls = 0
         sleepOpenAttempts = 0
-        sleepLoadAttempts = 0
+        sleepReopens = 0
+        offSleepStrikes = 0
         pausedUntil = 0L
         runDeadline = now() + WATCHDOG_MS
 
@@ -288,13 +328,13 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
         when (step) {
             Step.WAIT_APP -> waitForApp(root, timedOut)
-            Step.SYNC_GESTURE -> pullToSync(bounds)
-            Step.SYNC_WAIT -> waitForSync(bounds, texts, timedOut)
+            Step.SYNC_GESTURE -> pullToSync(root, bounds)
+            Step.SYNC_WAIT -> waitForSync(texts, timedOut)
             Step.HOME_COLLECT -> collectHome(root, texts, timedOut)
-            Step.OPEN_SLEEP -> openSleep(root, bounds, timedOut)
+            Step.OPEN_SLEEP -> openSleep(root, bounds, texts, timedOut)
             Step.SLEEP_LOAD -> waitForSleep(texts, timedOut)
             Step.SLEEP_CARDS -> readSleepCards(root, bounds, texts, timedOut)
-            Step.SLEEP_SCROLL -> readSleepAnalysis(root, texts, timedOut)
+            Step.SLEEP_SCROLL -> readSleepAnalysis(root, bounds, texts, timedOut)
             Step.FINISH, Step.IDLE -> Unit
         }
     }
@@ -302,32 +342,48 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     /** Vivo Health has to be the app on screen before anything else means anything. */
     private fun waitForApp(root: AccessibilityNodeInfo, timedOut: Boolean) {
         if (isVivoHealth(root.packageName?.toString())) {
-            goTo(Step.SYNC_GESTURE, 5_000L)
+            topScrollsLeft = MAX_TOP_SCROLLS
+            goTo(Step.SYNC_GESTURE, 12_000L)
             return
         }
         if (timedOut) abortRun("Vivo Health did not open")
     }
 
     /**
-     * The sync is triggered by dragging the list at the top of the Health tab.
-     * Pull-to-refresh (downward) is the mechanic in this app family, so it goes
-     * first; if no "Syncing" or "Sync complete" appears, [waitForSync] retries
-     * with an upward drag, so either gesture direction gets us there.
+     * The watch sync is the Health tab's pull-to-refresh: press, pull straight
+     * down, let go — the refresh fires on release, exactly like a feed.
+     *
+     * Two things this used to get wrong. It pulled from wherever the list
+     * happened to be, but pull-to-refresh only arms when the list is already at
+     * the top, so on a scrolled list the drag just scrolled content; and it held
+     * the finger down at the end of the drag, which lets the list settle back
+     * instead of releasing into the refresh. So: scroll to the top first, then
+     * one clean pull with no hold. If nothing happens we pull again, further —
+     * never upwards, which only scrolls away from the rings.
      */
-    private fun pullToSync(bounds: Rect) {
-        val midX = bounds.centerX().toFloat()
-        if (!pulledDown) {
-            pulledDown = true
-            drag(midX, bounds.top + bounds.height() * 0.30f, midX, bounds.top + bounds.height() * 0.78f)
-        } else {
-            pulledUp = true
-            drag(midX, bounds.top + bounds.height() * 0.78f, midX, bounds.top + bounds.height() * 0.30f)
+    private fun pullToSync(root: AccessibilityNodeInfo, bounds: Rect) {
+        if (topScrollsLeft > 0) {
+            topScrollsLeft--
+            if (scroll(root, AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) {
+                pause(500L)
+                return
+            }
+            topScrollsLeft = 0  // already at the top
         }
+
+        val midX = bounds.centerX().toFloat()
+        val from = bounds.top + bounds.height() * 0.24f
+        // A later attempt pulls further, in case the refresh threshold is deeper
+        // than the first pull reached.
+        val reach = if (syncPulls == 0) 0.60f else 0.74f
+        drag(bounds, midX, from, midX, bounds.top + bounds.height() * reach, durationMs = 320L)
+        syncPulls++
+
         goTo(Step.SYNC_WAIT, SYNC_WAIT_MS)
-        pause(2_000L)
+        pause(1_500L)
     }
 
-    private fun waitForSync(bounds: Rect, texts: List<String>, timedOut: Boolean) {
+    private fun waitForSync(texts: List<String>, timedOut: Boolean) {
         val blob = texts.joinToString(" | ").lowercase()
 
         if (!sawSyncing && (blob.contains("syncing") || blob.contains("synchronizing") ||
@@ -348,10 +404,11 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Nothing happened — the drag probably went the wrong way. Try the other.
-        if (!sawSyncing && !pulledUp && now() - stepStarted > SYNC_PROBE_MS) {
-            Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – trying the opposite drag")
-            goTo(Step.SYNC_GESTURE, 5_000L, "Retrying sync gesture…")
+        // The pull did not take. Pull again rather than guessing at a different
+        // gesture — refresh is downward-only.
+        if (!sawSyncing && syncPulls < MAX_SYNC_PULLS && now() - stepStarted > SYNC_PROBE_MS) {
+            Log.d(TAG, "no sync indicator after ${SYNC_PROBE_MS}ms – pulling again (#${syncPulls + 1})")
+            goTo(Step.SYNC_GESTURE, 12_000L, "Pulling down again…")
             return
         }
 
@@ -395,9 +452,22 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     }
 
     /** Taps the Sleep card, avoiding the "Sleep" entry in the bottom nav bar. */
-    private fun openSleep(root: AccessibilityNodeInfo, bounds: Rect, timedOut: Boolean) {
+    private fun openSleep(
+        root: AccessibilityNodeInfo,
+        bounds: Rect,
+        texts: List<String>,
+        timedOut: Boolean,
+    ) {
+        // Already on the detail screen — a retry can land here once the page
+        // finally renders. Tapping anything now would only navigate off it.
+        if (onSleepDetail(texts)) {
+            Log.d(TAG, "already on the sleep detail screen")
+            offSleepStrikes = 0
+            goTo(Step.SLEEP_LOAD, SLEEP_LOAD_MS)
+            return
+        }
+
         if (clickSleepCard(root, bounds)) {
-            sleepLoadAttempts++
             goTo(Step.SLEEP_LOAD, SLEEP_LOAD_MS)
             pause(3_000L)
             return
@@ -417,23 +487,20 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     private fun waitForSleep(texts: List<String>, timedOut: Boolean) {
         val blob = texts.joinToString(" | ").lowercase()
         val loading = blob.contains("loading") || blob.contains("please wait")
-        val ready = !loading && (
-                blob.contains("total sleep duration") ||
-                        blob.contains("compared to last") ||
-                        blob.contains("sleep heart rate") ||
-                        blob.contains("more analysis")
-                )
+        val ready = !loading && onSleepDetail(texts)
 
         if (ready) {
             addCapture(sleepCaptures, texts)
             cardSwipes = 0
             lastCardSignature = null
+            offSleepStrikes = 0
             goTo(Step.SLEEP_CARDS, SLEEP_CARDS_MS)
             return
         }
 
         if (timedOut) {
-            if (sleepLoadAttempts < 2) {
+            sleepReopens++
+            if (sleepReopens <= MAX_SLEEP_OPENS) {
                 Log.w(TAG, "sleep detail never rendered – trying the card again")
                 sleepOpenAttempts = 0
                 goTo(Step.OPEN_SLEEP, OPEN_SLEEP_MS, "Retrying Sleep…")
@@ -446,8 +513,10 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
     /**
      * The vitals live in a horizontal carousel — total duration, heart rate,
-     * respiratory rate, SpO₂, HRV — one card at a time. Swipe until all four
-     * ranges have parsed, the carousel stops changing, or we run out of swipes.
+     * respiratory rate, SpO₂, HRV — one card at a time. Advance it with the
+     * row's own scroll action where possible (a real gesture can be swallowed by
+     * the page, or land somewhere it shouldn't) until all four ranges have
+     * parsed, the carousel stops changing, or we run out of swipes.
      */
     private fun readSleepCards(
         root: AccessibilityNodeInfo,
@@ -455,6 +524,8 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         texts: List<String>,
         timedOut: Boolean,
     ) {
+        if (!confirmOnSleepDetail(root, texts)) return
+
         addCapture(sleepCaptures, texts)
 
         val sleep = parser.parseSleepDetail(sleepCaptures)
@@ -480,12 +551,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             return
         }
 
-        val y = carouselY(root, bounds)
-        drag(
-            bounds.left + bounds.width() * 0.80f, y,
-            bounds.left + bounds.width() * 0.20f, y,
-            durationMs = 320L,
-        )
+        advanceCarousel(root, bounds)
         cardSwipes++
         publish("Sleep vitals card ${cardSwipes + 1}")
         pause(1_600L)
@@ -497,21 +563,27 @@ class VivoHealthAccessibilityService : AccessibilityService() {
      */
     private fun readSleepAnalysis(
         root: AccessibilityNodeInfo,
+        bounds: Rect,
         texts: List<String>,
         timedOut: Boolean,
     ) {
+        if (!confirmOnSleepDetail(root, texts)) return
+
         addCapture(sleepCaptures, texts)
 
         if (!expandedAnalysis && texts.any { it.contains("more analysis", true) }) {
-            if (clickByText(root, "More analysis")) {
+            if (clickByText(root, "More analysis", bounds)) {
                 expandedAnalysis = true
                 publish("Expanding More analysis…")
                 Log.d(TAG, "tapped More analysis")
                 pause(3_000L)
                 return
             }
-            // Not a button on this build — the section is already inline.
-            expandedAnalysis = true
+            // Either it is sitting at the very bottom edge, where a tap is not
+            // safe to aim, or it is not a button on this build and the section is
+            // already inline. Scroll on and give it a couple more chances before
+            // deciding it is inline.
+            if (analysisScrolls >= 2) expandedAnalysis = true
         }
 
         val signature = texts.joinToString("|")
@@ -530,6 +602,83 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
         analysisScrolls++
         pause(1_300L)
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  Staying on the sleep detail screen
+    // ─────────────────────────────────────────────────────
+
+    private fun onSleepDetail(texts: List<String>): Boolean {
+        val blob = texts.joinToString(" | ").lowercase()
+        return SLEEP_MARKERS.any { blob.contains(it) }
+    }
+
+    /**
+     * The looser test, for a screen we are already reading rather than one we are
+     * waiting to appear. Scrolled deep into the analysis section none of the
+     * headline markers are on screen any more, so this asks a weaker question:
+     * is this still something sleep-shaped, and not the home tab we came from?
+     */
+    private fun stillOnSleepDetail(texts: List<String>): Boolean {
+        if (onSleepDetail(texts)) return true
+        val blob = texts.joinToString(" | ").lowercase()
+        return blob.contains("sleep") && HOME_TAB_ONLY.none { blob.contains(it) }
+    }
+
+    /**
+     * Something can still take us off the sleep detail screen mid-read — a tap
+     * that landed on the toolbar, or a swipe the app read as a back gesture.
+     * Continuing to swipe at whatever replaced it is how a run ended up on the
+     * home screen with nothing collected, so notice it and re-open Sleep.
+     *
+     * One miss is usually just a screen caught mid-transition, so it takes two
+     * in a row to count. Captures already taken are kept either way.
+     *
+     * @return true when the caller may carry on reading this screen.
+     */
+    private fun confirmOnSleepDetail(root: AccessibilityNodeInfo, texts: List<String>): Boolean {
+        if (stillOnSleepDetail(texts)) {
+            offSleepStrikes = 0
+            return true
+        }
+
+        offSleepStrikes++
+        if (offSleepStrikes < 2) {
+            pause(900L)
+            return false
+        }
+
+        val pkg = root.packageName?.toString()
+        Log.w(TAG, "no longer on the sleep detail screen during $step (package=$pkg)")
+        if (!isVivoHealth(pkg)) relaunchVivoHealth()
+
+        // Shared with the "detail never rendered" retry so the two recovery paths
+        // cannot hand each other a fresh budget and loop until the watchdog.
+        sleepReopens++
+        if (sleepReopens <= MAX_SLEEP_OPENS) {
+            offSleepStrikes = 0
+            sleepOpenAttempts = 0
+            goTo(Step.OPEN_SLEEP, OPEN_SLEEP_MS, "Reopening Sleep…")
+        } else {
+            Log.e(TAG, "could not stay on the sleep detail screen – finishing with what we have")
+            finish()
+        }
+        return false
+    }
+
+    /** We were bounced out of Vivo Health entirely; bring it back to the front. */
+    private fun relaunchVivoHealth() {
+        for (pkg in VIVO_HEALTH_PACKAGES) {
+            val intent = packageManager.getLaunchIntentForPackage(pkg) ?: continue
+            try {
+                startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                Log.d(TAG, "relaunched $pkg")
+                pause(2_500L)
+                return
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not relaunch $pkg", t)
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────
@@ -572,22 +721,24 @@ class VivoHealthAccessibilityService : AccessibilityService() {
 
     /** Bring our own UI back so the result is visible without the user hunting for it. */
     private fun returnToApp() {
-        performGlobalAction(GLOBAL_ACTION_BACK)
-        handler.postDelayed({
-            try {
-                startActivity(
-                    Intent(this, MainActivity::class.java).addFlags(
-                        Intent.FLAG_ACTIVITY_NEW_TASK or
-                                Intent.FLAG_ACTIVITY_SINGLE_TOP or
-                                Intent.FLAG_ACTIVITY_CLEAR_TOP
-                    )
+        // Start our activity first and only fall back to Back: a global back
+        // press is a navigation we cannot aim, and it is not needed when the
+        // launch works.
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                            Intent.FLAG_ACTIVITY_CLEAR_TOP
                 )
-            } catch (t: Throwable) {
-                // Background activity starts can be refused; the back press above
-                // is the fallback and the result is already delivered either way.
-                Log.w(TAG, "could not return to the app", t)
-            }
-        }, 600L)
+            )
+        } catch (t: Throwable) {
+            // Background activity starts can be refused; back out of Vivo Health
+            // so the user is not left on someone else's screen. The result has
+            // already been delivered either way.
+            Log.w(TAG, "could not return to the app – falling back to Back", t)
+            performGlobalAction(GLOBAL_ACTION_BACK)
+        }
     }
 
     // ─────────────────────────────────────────────────────
@@ -595,34 +746,28 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     // ─────────────────────────────────────────────────────
 
     /**
-     * A slow drag with a brief hold at the end — pull-to-refresh implementations
-     * measure the drag distance over time and ignore a flick.
+     * One press-drag-release, clamped into the content band by [safeX]/[safeY].
+     *
+     * There is deliberately no hold at the end: the finger lifts as soon as the
+     * drag does, which is what makes a pull-to-refresh fire and what a person's
+     * swipe actually looks like.
      */
     private fun drag(
+        bounds: Rect,
         fromX: Float,
         fromY: Float,
         toX: Float,
         toY: Float,
-        durationMs: Long = 800L,
-        holdMs: Long = 200L,
+        durationMs: Long = 320L,
     ) {
         val path = Path().apply {
-            moveTo(fromX, fromY)
-            lineTo(toX, toY)
+            moveTo(safeX(bounds, fromX), safeY(bounds, fromY))
+            lineTo(safeX(bounds, toX), safeY(bounds, toY))
         }
-        val builder = GestureDescription.Builder()
-        val stroke = GestureDescription.StrokeDescription(path, 0, durationMs, holdMs > 0)
-        builder.addStroke(stroke)
-        if (holdMs > 0) {
-            // A 1px contour: a zero-length path is rejected by StrokeDescription.
-            val hold = Path().apply {
-                moveTo(toX, toY)
-                lineTo(toX, toY + 1f)
-            }
-            builder.addStroke(stroke.continueStroke(hold, durationMs, holdMs, false))
-        }
-        val dispatched = dispatchGesture(builder.build(), null, null)
-        if (!dispatched) {
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        if (!dispatchGesture(gesture, null, null)) {
             Log.e(
                 TAG,
                 "dispatchGesture refused – canPerformGestures is missing from " +
@@ -631,17 +776,77 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Vertical centre of the vitals carousel, taken from the card's own bounds. */
-    private fun carouselY(root: AccessibilityNodeInfo, bounds: Rect): Float {
-        val anchor = findNode(root) { node ->
-            val text = nodeText(node)?.lowercase() ?: return@findNode false
-            text.contains("sleep heart rate") || text.contains("total sleep duration") ||
-                    text.contains("respiratory") || text.contains("spo2") ||
-                    text.contains("spo₂") || text.contains("hrv")
+    /** Keeps a gesture out of the toolbar above and the navigation bar below. */
+    private fun safeY(bounds: Rect, y: Float): Float = y.coerceIn(
+        bounds.top + bounds.height() * TOP_SAFE,
+        bounds.top + bounds.height() * BOTTOM_SAFE,
+    )
+
+    /** Keeps a gesture off the side edges, where it becomes a back gesture. */
+    private fun safeX(bounds: Rect, x: Float): Float = x.coerceIn(
+        bounds.left + bounds.width() * EDGE_SAFE,
+        bounds.left + bounds.width() * (1f - EDGE_SAFE),
+    )
+
+    /**
+     * Moves the vitals carousel on by one card.
+     *
+     * The row's own scroll action is tried first — it cannot miss and cannot tap
+     * anything. Only if the row does not expose one do we swipe, and then across
+     * the row's real bounds rather than a guessed fraction of the screen: the old
+     * blind swipe could be handed a y from a node that was off screen, putting
+     * the gesture down on the navigation bar.
+     */
+    private fun advanceCarousel(root: AccessibilityNodeInfo, bounds: Rect) {
+        val row = carouselRow(root, bounds)
+        if (row != null && row.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+            Log.d(TAG, "carousel advanced with ACTION_SCROLL_FORWARD")
+            return
         }
-        val rect = Rect()
-        anchor?.getBoundsInScreen(rect)
-        if (rect.height() > 0 && rect.centerY() > bounds.top) return rect.centerY().toFloat()
+
+        val rect = Rect().also { row?.getBoundsInScreen(it) }
+        val y = if (rect.height() > 0) rect.exactCenterY() else carouselY(root, bounds)
+        val left = if (rect.width() > 0) rect.left.toFloat() else bounds.left.toFloat()
+        val width = if (rect.width() > 0) rect.width().toFloat() else bounds.width().toFloat()
+        drag(bounds, left + width * 0.78f, y, left + width * 0.22f, y)
+    }
+
+    /** The tile row: the horizontally scrollable ancestor of a vitals label. */
+    private fun carouselRow(root: AccessibilityNodeInfo, bounds: Rect): AccessibilityNodeInfo? {
+        var node: AccessibilityNodeInfo? = vitalsAnchor(root, bounds)
+        var depth = 0
+        while (depth < 6) {
+            val current = node ?: return null
+            val rect = Rect().also { current.getBoundsInScreen(it) }
+            if (current.isScrollable && rect.width() > rect.height()) return current
+            node = current.parent
+            depth++
+        }
+        return null
+    }
+
+    /** A visible vitals label, used to locate the carousel on screen. */
+    private fun vitalsAnchor(root: AccessibilityNodeInfo, bounds: Rect): AccessibilityNodeInfo? =
+        findNode(root) { node ->
+            val text = nodeText(node)?.lowercase() ?: return@findNode false
+            val matches = text.contains("sleep heart rate") ||
+                    text.contains("total sleep duration") || text.contains("respiratory") ||
+                    text.contains("spo2") || text.contains("spo₂") || text.contains("hrv")
+            if (!matches) return@findNode false
+            // Off-screen matches ("Average blood oxygen" further down the page)
+            // would drag the gesture out of the content band.
+            val rect = Rect().also { node.getBoundsInScreen(it) }
+            rect.height() > 0 && isInContentBand(bounds, rect)
+        }
+
+    private fun isInContentBand(bounds: Rect, rect: Rect): Boolean =
+        rect.centerY() > bounds.top + bounds.height() * TOP_SAFE &&
+                rect.centerY() < bounds.top + bounds.height() * BOTTOM_SAFE
+
+    /** Fallback vertical centre for the carousel when no label is visible. */
+    private fun carouselY(root: AccessibilityNodeInfo, bounds: Rect): Float {
+        val rect = Rect().also { vitalsAnchor(root, bounds)?.getBoundsInScreen(it) }
+        if (rect.height() > 0) return rect.exactCenterY()
         return bounds.top + bounds.height() * 0.45f
     }
 
@@ -723,18 +928,20 @@ class VivoHealthAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * The home screen has three things reading "Sleep": the card we want, the
-     * bottom navigation tab, and the "Sleep heart rate" label. Prefer an exact
-     * match, ignore anything sitting in the bottom nav strip.
+     * The home screen has several things reading "Sleep": the card we want, the
+     * bottom navigation tab, and labels like "Sleep heart rate". Prefer an exact
+     * match, and only consider nodes inside the content band — the toolbar strip
+     * at the top holds the screen title and its back arrow, and "clicking" that
+     * title walks up to the toolbar and presses back.
      */
     private fun clickSleepCard(root: AccessibilityNodeInfo, bounds: Rect): Boolean {
-        val navTop = bounds.top + bounds.height() * 0.88f
         val candidates = mutableListOf<AccessibilityNodeInfo>()
         collectNodes(root, 0, candidates) { node ->
-            val text = nodeText(node)?.lowercase() ?: return@collectNodes false
+            val text = nodeText(node)?.trim()?.lowercase() ?: return@collectNodes false
             if (!text.startsWith("sleep")) return@collectNodes false
+            if (NOT_THE_SLEEP_CARD.any { text.contains(it) }) return@collectNodes false
             val rect = Rect().also { node.getBoundsInScreen(it) }
-            rect.height() > 0 && rect.top < navTop
+            rect.height() > 0 && isInContentBand(bounds, rect)
         }
 
         val ordered = candidates.sortedBy { node ->
@@ -744,7 +951,7 @@ class VivoHealthAccessibilityService : AccessibilityService() {
             }
         }
         for (node in ordered) {
-            if (clickSelfOrAncestor(node)) {
+            if (clickSelfOrAncestor(node, bounds)) {
                 Log.d(TAG, "clicked Sleep entry \"${nodeText(node)}\"")
                 return true
             }
@@ -752,22 +959,33 @@ class VivoHealthAccessibilityService : AccessibilityService() {
         return false
     }
 
-    private fun clickByText(root: AccessibilityNodeInfo, text: String): Boolean {
+    private fun clickByText(root: AccessibilityNodeInfo, text: String, bounds: Rect): Boolean {
         val matches = root.findAccessibilityNodeInfosByText(text) ?: return false
         for (node in matches) {
-            if (clickSelfOrAncestor(node)) return true
+            if (clickSelfOrAncestor(node, bounds)) return true
         }
         return false
     }
 
-    private fun clickSelfOrAncestor(node: AccessibilityNodeInfo?): Boolean {
-        var current = node
+    /**
+     * Clicks the node, or the nearest clickable thing containing it.
+     *
+     * The walk stops early and refuses anything as tall as most of the screen:
+     * those are the page container and the toolbar, not a card, and firing a
+     * click on the toolbar is what took us back out of the Sleep screen.
+     */
+    private fun clickSelfOrAncestor(node: AccessibilityNodeInfo?, bounds: Rect): Boolean {
+        var next = node
         var depth = 0
-        while (current != null && depth < 8) {
-            if (current.isClickable && current.isEnabled) {
+        while (depth < 4) {
+            val current = next ?: return false
+            val rect = Rect().also { current.getBoundsInScreen(it) }
+            val tooBig = rect.height() > bounds.height() * 0.6f
+            if (tooBig) return false
+            if (current.isClickable && current.isEnabled && isInContentBand(bounds, rect)) {
                 return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             }
-            current = current.parent
+            next = current.parent
             depth++
         }
         return false

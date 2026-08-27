@@ -22,6 +22,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Nothing here is shipped, so skip the optimisation passes that cost
+            // wall-clock on every build.
+            isCrunchPngs = false
+            isPseudoLocalesEnabled = false
+        }
         release {
             isMinifyEnabled = false
             proguardFiles(
@@ -31,17 +37,20 @@ android {
         }
     }
 
+    // JDK 17 bytecode: minSdk is 26, so targeting 1.8 only bought extra
+    // desugaring work on every dex run.
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
 
     buildFeatures {
         compose = true
+        buildConfig = false
     }
 
     composeOptions {
@@ -66,8 +75,11 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    implementation("com.google.android.material:material:1.12.0")
+    // icons-core only: every icon this app uses (Add/Check/Delete/Home/Info/
+    // List/Warning) lives there. material-icons-extended ships ~7 000 icon
+    // classes and was the single biggest cost in compile + dex; the one icon it
+    // was here for, Sync, is now res/drawable/ic_sync.xml.
+    implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.activity:activity-compose:1.9.0")
     implementation("androidx.navigation:navigation-compose:2.7.7")
 
