@@ -109,16 +109,20 @@ data class HeartRateDetail(
     val range: MetricRange<Int>? = null,
     val restingBpm: Int? = null,
     val currentBpm: Int? = null,
+    val walkingBpm: Int? = null,
+    val sleepingBpm: Int? = null,
 ) {
-    fun hasData(): Boolean = range != null || restingBpm != null || currentBpm != null
+    fun hasData(): Boolean = range != null || restingBpm != null || currentBpm != null ||
+            walkingBpm != null || sleepingBpm != null
 }
 
 data class StressDetail(
     val range: MetricRange<Int>? = null,
     val average: Int? = null,
     val category: String? = null,
+    val current: Int? = null,
 ) {
-    fun hasData(): Boolean = range != null || average != null || category != null
+    fun hasData(): Boolean = range != null || average != null || category != null || current != null
 }
 
 data class OxygenSaturationDetail(
@@ -169,19 +173,23 @@ data class ParsedHealthData(
         if (stages > 0) parts.add("$stages stages")
 
         heartRate?.let { hr ->
+            val hrParts = mutableListOf<String>()
+            hr.currentBpm?.let { hrParts.add("HR $it bpm") }
             when {
-                hr.restingBpm != null && hr.range != null -> {
-                    parts.add("HR ${hr.range.format("bpm")} (resting ${hr.restingBpm})")
+                hr.range != null && hr.restingBpm != null -> {
+                    hrParts.add(if (hr.currentBpm != null) "range ${hr.range.format("bpm")} (resting ${hr.restingBpm})" else "HR ${hr.range.format("bpm")} (resting ${hr.restingBpm})")
                 }
                 hr.range != null -> {
-                    parts.add("HR ${hr.range.format("bpm")}")
+                    hrParts.add(if (hr.currentBpm != null) "range ${hr.range.format("bpm")}" else "HR ${hr.range.format("bpm")}")
                 }
                 hr.restingBpm != null -> {
-                    parts.add("Resting HR ${hr.restingBpm} bpm")
+                    hrParts.add("Resting HR ${hr.restingBpm} bpm")
                 }
-                hr.currentBpm != null -> {
-                    parts.add("HR ${hr.currentBpm} bpm")
-                }
+            }
+            hr.walkingBpm?.let { hrParts.add("walking $it") }
+            hr.sleepingBpm?.let { hrParts.add("sleeping $it") }
+            if (hrParts.isNotEmpty()) {
+                parts.add(hrParts.joinToString(" · "))
             }
             Unit
         } ?: run {
@@ -191,10 +199,24 @@ data class ParsedHealthData(
 
         stress?.let { st ->
             val cat = st.category?.let { " ($it)" } ?: ""
+            val stParts = mutableListOf<String>()
+            st.current?.let { stParts.add("Stress $it$cat") }
             when {
-                st.average != null -> parts.add("Stress avg ${st.average}$cat")
-                st.range != null -> parts.add("Stress ${st.range.format()}$cat")
-                st.category != null -> parts.add("Stress ${st.category}")
+                st.average != null -> {
+                    val label = if (st.current != null) "avg ${st.average}" else "Stress avg ${st.average}$cat"
+                    stParts.add(label)
+                }
+                st.range != null -> {
+                    val label = if (st.current != null) "range ${st.range.format()}" else "Stress ${st.range.format()}$cat"
+                    stParts.add(label)
+                }
+                st.category != null && st.current == null -> stParts.add("Stress ${st.category}")
+            }
+            if (st.range != null && st.average != null && st.current != null) {
+                stParts.add("range ${st.range.format()}")
+            }
+            if (stParts.isNotEmpty()) {
+                parts.add(stParts.joinToString(" · "))
             }
             Unit
         } ?: run {
@@ -202,11 +224,24 @@ data class ParsedHealthData(
         }
 
         oxygenSaturation?.let { spo2 ->
+            val oxyParts = mutableListOf<String>()
+            spo2.current?.let { oxyParts.add("SpO₂ $it%") }
             when {
-                spo2.average != null -> parts.add("SpO₂ avg ${spo2.average}%")
-                spo2.range != null -> parts.add("SpO₂ ${spo2.range.format("%")}")
-                spo2.averageSleep != null -> parts.add("Sleep SpO₂ avg ${spo2.averageSleep}%")
-                spo2.current != null -> parts.add("SpO₂ ${spo2.current}%")
+                spo2.average != null -> {
+                    val label = if (spo2.current != null) "avg ${spo2.average}%" else "SpO₂ avg ${spo2.average}%"
+                    oxyParts.add(label)
+                }
+                spo2.range != null -> {
+                    val label = if (spo2.current != null) "range ${spo2.range.format("%")}" else "SpO₂ ${spo2.range.format("%")}"
+                    oxyParts.add(label)
+                }
+            }
+            if (spo2.range != null && spo2.average != null && spo2.current != null) {
+                oxyParts.add("range ${spo2.range.format("%")}")
+            }
+            spo2.averageSleep?.let { oxyParts.add("sleep avg $it%") }
+            if (oxyParts.isNotEmpty()) {
+                parts.add(oxyParts.joinToString(" · "))
             }
             Unit
         }
@@ -229,9 +264,9 @@ fun DailyActivity.merge(other: DailyActivity): DailyActivity = DailyActivity(
 )
 
 fun SleepDetail.merge(other: SleepDetail): SleepDetail {
-    val preferOtherStages = (other.deepMinutes != null || other.lightMinutes != null || other.remMinutes != null) &&
-            (!other.stagesDerived || this.deepMinutes == null || this.stagesDerived)
-    val useOtherStages = preferOtherStages || (this.deepMinutes == null && this.lightMinutes == null && this.remMinutes == null)
+    val thisHasStages = this.deepMinutes != null || this.lightMinutes != null || this.remMinutes != null
+    val otherHasStages = other.deepMinutes != null || other.lightMinutes != null || other.remMinutes != null
+    val useOtherStages = otherHasStages && (!thisHasStages || !other.stagesDerived)
 
     return SleepDetail(
         totalMinutes = other.totalMinutes ?: this.totalMinutes,
@@ -269,12 +304,15 @@ fun HeartRateDetail.merge(other: HeartRateDetail): HeartRateDetail = HeartRateDe
     range = other.range ?: this.range,
     restingBpm = other.restingBpm ?: this.restingBpm,
     currentBpm = other.currentBpm ?: this.currentBpm,
+    walkingBpm = other.walkingBpm ?: this.walkingBpm,
+    sleepingBpm = other.sleepingBpm ?: this.sleepingBpm,
 )
 
 fun StressDetail.merge(other: StressDetail): StressDetail = StressDetail(
     range = other.range ?: this.range,
     average = other.average ?: this.average,
     category = other.category ?: this.category,
+    current = other.current ?: this.current,
 )
 
 fun OxygenSaturationDetail.merge(other: OxygenSaturationDetail): OxygenSaturationDetail = OxygenSaturationDetail(

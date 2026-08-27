@@ -328,9 +328,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         data.heartRate?.let { hr ->
             val parts = mutableListOf<String>()
+            hr.currentBpm?.let { parts.add("current $it bpm") }
             hr.range?.let { parts.add(it.format("bpm")) }
             hr.restingBpm?.let { parts.add("resting $it bpm") }
             hr.currentBpm?.let { parts.add("current $it bpm") }
+            hr.walkingBpm?.let { parts.add("walking $it bpm") }
+            hr.sleepingBpm?.let { parts.add("sleeping $it bpm") }
             if (parts.isNotEmpty()) {
                 syncRepository.logSync(HealthMetricType.HEART_RATE.name, parts.joinToString(" · "), ok)
             }
@@ -345,6 +348,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         data.stress?.let { st ->
             val parts = mutableListOf<String>()
+            st.current?.let { parts.add("current $it") }
             st.average?.let { parts.add("avg $it") }
             st.range?.let { parts.add("range ${it.min}–${it.max}") }
             st.category?.let { parts.add(it) }
@@ -360,6 +364,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         data.oxygenSaturation?.let { oxy ->
             val parts = mutableListOf<String>()
+            oxy.current?.let { parts.add("current $it%") }
+            oxy.average?.let { parts.add("avg $it%") }
             oxy.range?.let { parts.add(it.format("%")) }
             oxy.average?.let { parts.add("avg $it%") }
             oxy.averageSleep?.let { parts.add("sleep avg $it%") }

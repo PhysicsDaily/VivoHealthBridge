@@ -58,6 +58,8 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             var maxBpm by remember { mutableStateOf("") }
             var restingBpm by remember { mutableStateOf("") }
             var currentBpm by remember { mutableStateOf("") }
+            var walkingBpm by remember { mutableStateOf("") }
+            var sleepingBpm by remember { mutableStateOf("") }
 
             Text("Daily Range (BPM)", style = MaterialTheme.typography.labelMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -88,6 +90,20 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = walkingBpm, onValueChange = { walkingBpm = it.filter { c -> c.isDigit() } },
+                    label = { Text("Walking BPM") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f), singleLine = true
+                )
+                OutlinedTextField(
+                    value = sleepingBpm, onValueChange = { sleepingBpm = it.filter { c -> c.isDigit() } },
+                    label = { Text("Sleeping BPM") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f), singleLine = true
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
                     val min = minBpm.toIntOrNull()
@@ -95,16 +111,27 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val range = if (min != null && max != null) MetricRange(min, max) else null
                     val rest = restingBpm.toIntOrNull()
                     val curr = currentBpm.toIntOrNull()
+                    val walk = walkingBpm.toIntOrNull()
+                    val sleep = sleepingBpm.toIntOrNull()
                     val data = ParsedHealthData(
                         heartRate = HeartRateDetail(range = range, restingBpm = rest, currentBpm = curr),
+                        heartRate = HeartRateDetail(
+                            range = range,
+                            restingBpm = rest,
+                            currentBpm = curr,
+                            walkingBpm = walk,
+                            sleepingBpm = sleep
+                        ),
                         restingHeartRateBpm = rest,
                         heartRateBpm = curr ?: range?.min
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "Heart rate synced!"
                     minBpm = ""; maxBpm = ""; restingBpm = ""; currentBpm = ""
+                    minBpm = ""; maxBpm = ""; restingBpm = ""; currentBpm = ""; walkingBpm = ""; sleepingBpm = ""
                 },
                 enabled = (minBpm.isNotEmpty() && maxBpm.isNotEmpty()) || restingBpm.isNotEmpty() || currentBpm.isNotEmpty(),
+                enabled = (minBpm.isNotEmpty() && maxBpm.isNotEmpty()) || restingBpm.isNotEmpty() || currentBpm.isNotEmpty() || walkingBpm.isNotEmpty() || sleepingBpm.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save Heart Rate") }
         }
@@ -282,6 +309,7 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             var spo2Max by remember { mutableStateOf("") }
             var avgSpo2 by remember { mutableStateOf("") }
             var sleepAvgSpo2 by remember { mutableStateOf("") }
+            var currentSpo2 by remember { mutableStateOf("") }
 
             Text("Daily Range (%)", style = MaterialTheme.typography.labelMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -312,6 +340,13 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             }
 
             Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = currentSpo2, onValueChange = { currentSpo2 = it.filter { c -> c.isDigit() } },
+                label = { Text("Current SpO₂ %") }, modifier = Modifier.fillMaxWidth(), singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = {
                     val min = spo2Min.toIntOrNull()
@@ -319,19 +354,23 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val range = if (min != null && max != null) MetricRange(min, max) else null
                     val avg = avgSpo2.toIntOrNull()
                     val sleepAvg = sleepAvgSpo2.toIntOrNull()
+                    val curr = currentSpo2.toIntOrNull() ?: avg ?: max ?: min
                     val data = ParsedHealthData(
                         oxygenSaturation = OxygenSaturationDetail(
                             range = range,
                             average = avg,
                             averageSleep = sleepAvg,
                             current = avg ?: max ?: min
+                            current = curr
                         )
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "SpO2 synced!"
                     spo2Min = ""; spo2Max = ""; avgSpo2 = ""; sleepAvgSpo2 = ""
+                    spo2Min = ""; spo2Max = ""; avgSpo2 = ""; sleepAvgSpo2 = ""; currentSpo2 = ""
                 },
                 enabled = (spo2Min.isNotEmpty() && spo2Max.isNotEmpty()) || avgSpo2.isNotEmpty() || sleepAvgSpo2.isNotEmpty(),
+                enabled = (spo2Min.isNotEmpty() && spo2Max.isNotEmpty()) || avgSpo2.isNotEmpty() || sleepAvgSpo2.isNotEmpty() || currentSpo2.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save SpO2") }
         }
@@ -341,6 +380,7 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
             var stressMin by remember { mutableStateOf("") }
             var stressMax by remember { mutableStateOf("") }
             var avgStress by remember { mutableStateOf("") }
+            var currentStress by remember { mutableStateOf("") }
             var customCategory by remember { mutableStateOf("") }
 
             Text("Daily Range (0-100)", style = MaterialTheme.typography.labelMedium)
@@ -359,11 +399,17 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
 
             Spacer(modifier = Modifier.height(8.dp))
             val avg = avgStress.toIntOrNull()
+            val curr = currentStress.toIntOrNull()
+            val refScore = curr ?: avg
             val autoCat = when {
                 avg == null -> ""
                 avg in 1..33 -> "Relaxed"
                 avg in 34..66 -> "Moderate"
                 avg in 67..100 -> "High"
+                refScore == null -> ""
+                refScore in 1..33 -> "Relaxed"
+                refScore in 34..66 -> "Moderate"
+                refScore in 67..100 -> "High"
                 else -> ""
             }
 
@@ -377,8 +423,18 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     value = customCategory, onValueChange = { customCategory = it },
                     label = { Text("Category") }, placeholder = { if (autoCat.isNotEmpty()) Text(autoCat) },
                     modifier = Modifier.weight(1f), singleLine = true
+                    value = currentStress, onValueChange = { currentStress = it.filter { c -> c.isDigit() } },
+                    label = { Text("Current Stress") }, modifier = Modifier.weight(1f), singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
                 )
             }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            OutlinedTextField(
+                value = customCategory, onValueChange = { customCategory = it },
+                label = { Text("Category") }, placeholder = { if (autoCat.isNotEmpty()) Text(autoCat) },
+                modifier = Modifier.fillMaxWidth(), singleLine = true
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
             Button(
@@ -390,13 +446,17 @@ fun ManualEntryScreen(viewModel: MainViewModel) {
                     val data = ParsedHealthData(
                         stress = StressDetail(range = range, average = avg, category = cat),
                         stressLevel = avg ?: max ?: min,
+                        stress = StressDetail(range = range, average = avg, category = cat, current = curr),
+                        stressLevel = curr ?: avg ?: max ?: min,
                         stressCategory = cat
                     )
                     viewModel.syncManualEntry(data)
                     showSuccess = "Stress synced!"
                     stressMin = ""; stressMax = ""; avgStress = ""; customCategory = ""
+                    stressMin = ""; stressMax = ""; avgStress = ""; currentStress = ""; customCategory = ""
                 },
                 enabled = (stressMin.isNotEmpty() && stressMax.isNotEmpty()) || avgStress.isNotEmpty(),
+                enabled = (stressMin.isNotEmpty() && stressMax.isNotEmpty()) || avgStress.isNotEmpty() || currentStress.isNotEmpty(),
                 modifier = Modifier.fillMaxWidth()
             ) { Text("Save Stress") }
         }

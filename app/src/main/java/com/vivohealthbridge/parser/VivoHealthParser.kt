@@ -4,6 +4,7 @@ import com.vivohealthbridge.data.models.DailyActivity
 import com.vivohealthbridge.data.models.HeartRateDetail
 import com.vivohealthbridge.data.models.MetricRange
 import com.vivohealthbridge.data.models.OxygenSaturationDetail
+import com.vivohealthbridge.data.models.ParsedHealthData
 import com.vivohealthbridge.data.models.SleepDetail
 import com.vivohealthbridge.data.models.StressDetail
 
@@ -51,6 +52,10 @@ class VivoHealthParser {
         private val FIRST_INT = Regex("""(\d+)""")
         private val CURRENT_GOAL = Regex("""(\d+)\s*/\s*(\d+)""")
         private val KILOMETRES = Regex("""([\d.]+)\s*km""", RegexOption.IGNORE_CASE)
+        private val BPM_VALUE = Regex("""(?<![\d.])(\d{2,3})\s*bpm\b""", RegexOption.IGNORE_CASE)
+        private val KG_VALUE = Regex("""(?<![\d.])(\d{2,3}(?:\.\d+)?)\s*kg\b""", RegexOption.IGNORE_CASE)
+        private val TIME_AGO = Regex("""\b\d+\s*(?:m|mins?|minutes?|h|hrs?|hours?|s|secs?|seconds?)\s*ago\b""", RegexOption.IGNORE_CASE)
+        private val JUST_NOW = Regex("""\bjust\s*now\b""", RegexOption.IGNORE_CASE)
     }
 
     // ══════════════════════════════════════════════════════════════
@@ -100,6 +105,66 @@ class VivoHealthParser {
      */
     @JvmName("parseHomeActivityFromTexts")
     fun parseHomeActivity(texts: List<String>): DailyActivity = parseHomeActivity(listOf(texts))
+
+    /**
+     * Reads recent metrics displayed directly on the Health home tab cards:
+     * - Heart rate card: "Heart rate", "2m ago" / "Just now", "82bpm" / "88bpm"
+     * - Stress card: "Stress", "4m ago", "47", "Moderate"
+     * - Oxygen saturation card: "Oxygen saturation", "44m ago", "98%", "Normal"
+     * - Weight card: "Weight", "56.4 kg"
+     */
+    fun parseHomeCards(captures: List<List<String>>): ParsedHealthData {
+        val screen = Screen(captures)
+
+        val hrCurrent = screen.valueNear(
+            labelMatch = { it.equals("heart rate", true) },
+            forward = 6
+        ) { parseBpm(it) }
+
+        val stressCurrent = screen.valueNear(
+            labelMatch = { it.equals("stress", true) },
+            forward = 6
+        ) { text ->
+            if (TIME_AGO.containsMatchIn(text) || JUST_NOW.containsMatchIn(text)) null
+            else parseSingleInt(text)?.takeIf { it in 1..100 }
+        }
+        val stressCat = screen.valueNear(
+            labelMatch = { it.equals("stress", true) },
+            forward = 6
+        ) { parseStressCategory(it) }
+
+        val spo2Current = screen.valueNear(
+            labelMatch = { it.equals("oxygen saturation", true) || it.equals("blood oxygen", true) || it.equals("spo2", true) },
+            forward = 6
+        ) { text ->
+            if (TIME_AGO.containsMatchIn(text) || JUST_NOW.containsMatchIn(text)) null
+            else parseOxygenPercent(text)
+        }
+
+        val weight = screen.valueNear(
+            labelMatch = { it.equals("weight", true) },
+            forward = 6
+        ) { parseWeightKg(it) }
+
+        val hrDetail = hrCurrent?.let { HeartRateDetail(currentBpm = it) }
+        val stressDetail = if (stressCurrent != null || stressCat != null) {
+            StressDetail(current = stressCurrent, average = stressCurrent, category = stressCat)
+        } else null
+        val spo2Detail = spo2Current?.let { OxygenSaturationDetail(current = it) }
+
+        return ParsedHealthData(
+            heartRate = hrDetail,
+            heartRateBpm = hrCurrent,
+            stress = stressDetail,
+            stressLevel = stressCurrent,
+            stressCategory = stressCat,
+            oxygenSaturation = spo2Detail,
+            weightKg = weight
+        )
+    }
+
+    @JvmName("parseHomeCardsFromTexts")
+    fun parseHomeCards(texts: List<String>): ParsedHealthData = parseHomeCards(listOf(texts))
 
     // ══════════════════════════════════════════════════════════════
     //  Step 2 · Sleep detail screen
@@ -194,21 +259,33 @@ class VivoHealthParser {
         val screen = Screen(captures)
 
         val range = screen.valueNear(
-            { (it.contains("heart rate range", true) || it.contains("daily range", true) || it.contains("range", true) || it.equals("heart rate", true)) && !it.contains("resting", true) && !it.contains("current", true) }
+            { (it.contains("heart rate range", true) || it.contains("daily range", true) || it.contains("range", true) || it.equals("heart rate", true)) &&
+                    !it.contains("resting", true) && !it.contains("walking", true) && !it.contains("sleeping", true) && !it.contains("current", true) }
         ) { parseIntRange(it) } ?: screen.firstNotNull { parseIntRange(it) }
 
         val restingBpm = screen.valueNear(
             { (it.contains("resting heart rate", true) || it.contains("resting hr", true) || it.contains("resting", true)) && !it.contains("range", true) }
-        ) { parseSingleInt(it) }
+        ) { parseBpm(it) ?: parseSingleInt(it) }
+
+        val walkingBpm = screen.valueNear(
+            { (it.contains("average walking heart rate", true) || it.contains("walking heart rate", true) || it.contains("walking hr", true) || it.contains("walking", true)) && !it.contains("range", true) }
+        ) { parseBpm(it) ?: parseSingleInt(it) }
+
+        val sleepingBpm = screen.valueNear(
+            { (it.contains("normal sleeping heart rate", true) || it.contains("sleeping heart rate", true) || it.contains("sleeping hr", true) || it.contains("sleeping", true) || (it.contains("sleep", true) && it.contains("heart rate", true))) &&
+                    !it.contains("range", true) && !it.contains("hypnogram", true) }
+        ) { parseBpm(it) ?: parseSingleInt(it) }
 
         val currentBpm = screen.valueNear(
             { (it.contains("current", true) || it.contains("latest", true) || it.contains("real-time", true)) && !it.contains("range", true) }
-        ) { parseSingleInt(it) }
+        ) { parseBpm(it) ?: parseSingleInt(it) }
 
         return HeartRateDetail(
             range = range,
             restingBpm = restingBpm,
             currentBpm = currentBpm,
+            walkingBpm = walkingBpm,
+            sleepingBpm = sleepingBpm,
         )
     }
 
@@ -223,16 +300,21 @@ class VivoHealthParser {
         val screen = Screen(captures)
 
         val range = screen.valueNear(
-            { it.contains("stress range", true) || it.contains("daily range", true) || (it.contains("range", true) && !it.contains("average", true)) }
+            { (it.contains("stress range", true) || it.contains("daily range", true) || (it.contains("range", true) && !it.contains("average", true))) &&
+                    !it.contains("relaxed", true) && !it.contains("moderate", true) && !it.contains("high", true) && !it.contains("distribution", true) }
         ) { parseIntRange(it) } ?: screen.firstNotNull { parseIntRange(it) }
 
         val average = screen.valueNear(
-            { (it.contains("average", true) || it.contains("avg", true) || it.contains("score", true)) && !it.contains("range", true) }
+            { (it.contains("average stress", true) || it.contains("average", true) || it.contains("avg", true) || it.contains("score", true)) &&
+                    !it.contains("range", true) && !it.contains("distribution", true) }
         ) { parseScore(it) ?: parseSingleInt(it) }
 
         val category = screen.valueNear(
-            { (it.contains("category", true) || it.contains("status", true) || it.contains("level", true) || it.contains("stress", true)) && !it.contains("range", true) }
-        ) { text -> parseStressCategory(text) } ?: screen.firstNotNull { text -> parseStressCategory(text) } ?: average?.let { avg ->
+            { (it.contains("category", true) || it.contains("status", true) || it.contains("level", true) || it.contains("average stress", true) || it.contains("stress", true)) &&
+                    !it.contains("range", true) && !it.contains("distribution", true) }
+        ) { text -> parseStressCategory(text) } ?: screen.firstNotNull { text ->
+            if (text.contains("distribution", true)) null else parseStressCategory(text)
+        } ?: average?.let { avg ->
             when (avg) {
                 in 1..33 -> "Relaxed"
                 in 34..66 -> "Moderate"
@@ -241,10 +323,16 @@ class VivoHealthParser {
             }
         }
 
+        val current = screen.valueNear(
+            { (it.contains("current", true) || it.contains("latest", true) || it.contains("real-time", true)) &&
+                    !it.contains("range", true) && !it.contains("average", true) && !it.contains("distribution", true) }
+        ) { parseScore(it) ?: parseSingleInt(it) }
+
         return StressDetail(
             range = range,
             average = average,
             category = category,
+            current = current,
         )
     }
 
@@ -270,21 +358,23 @@ class VivoHealthParser {
         val screen = Screen(captures)
 
         val range = screen.valueNear(
-            { (it.contains("spo2 range", true) || it.contains("blood oxygen range", true) || it.contains("range", true) || it.contains("spo2", true) || it.contains("blood oxygen", true) || it.contains("oxygen saturation", true)) && !it.contains("average", true) && !it.contains("avg", true) }
+            { (it.contains("spo2 range", true) || it.contains("blood oxygen range", true) || it.contains("range", true) || it.contains("spo2", true) || it.contains("blood oxygen", true) || it.contains("oxygen saturation", true)) &&
+                    !it.contains("average", true) && !it.contains("avg", true) && !it.contains("altitude", true) }
         ) { parseIntRange(it) } ?: screen.firstNotNull { parseIntRange(it) }
 
         val averageSleep = screen.valueNear(
-            { it.contains("sleep", true) && (it.contains("average", true) || it.contains("avg", true) || it.contains("blood oxygen", true) || it.contains("spo2", true) || it.contains("oxygen", true)) && !it.contains("range", true) }
+            { it.contains("sleep", true) && (it.contains("average", true) || it.contains("avg", true) || it.contains("blood oxygen", true) || it.contains("spo2", true) || it.contains("oxygen", true)) &&
+                    !it.contains("range", true) && !it.contains("altitude", true) }
         ) { parseOxygenPercent(it) }
 
         val average = screen.valueNear(
-            { (it.contains("average", true) || it.contains("avg", true) || it.contains("daily", true)) && !it.contains("sleep", true) && !it.contains("range", true) }
-        ) { parseOxygenPercent(it) } ?: screen.valueNear(
-            { (it.contains("average blood oxygen", true) || it.contains("average spo2", true) || it.contains("blood oxygen", true) || it.contains("spo2", true) || it.contains("oxygen saturation", true)) && !it.contains("sleep", true) && !it.contains("range", true) }
+            { (it.contains("average oxygen saturation", true) || it.contains("average blood oxygen", true) || it.contains("average spo2", true) || it.contains("average", true) || it.contains("avg", true) || it.contains("daily", true)) &&
+                    !it.contains("sleep", true) && !it.contains("range", true) && !it.contains("altitude", true) }
         ) { parseOxygenPercent(it) }
 
         val current = screen.valueNear(
-            { (it.contains("current", true) || it.contains("latest", true) || it.contains("real-time", true)) && !it.contains("range", true) }
+            { (it.contains("current", true) || it.contains("latest", true) || it.contains("real-time", true)) &&
+                    !it.contains("range", true) && !it.contains("average", true) && !it.contains("sleep", true) && !it.contains("altitude", true) }
         ) { parseOxygenPercent(it) }
 
         return OxygenSaturationDetail(
@@ -410,6 +500,22 @@ class VivoHealthParser {
     /** `"0.05 km"` → 0.05f */
     fun parseKilometres(text: String): Float? =
         KILOMETRES.find(normalize(text))?.groupValues?.get(1)?.toFloatOrNull()
+
+    /** `"82 bpm"`, `"88bpm"`, or bare integer bpm in 30..250 */
+    fun parseBpm(text: String): Int? {
+        val t = normalize(text)
+        if (INT_RANGE.containsMatchIn(t) || FLOAT_RANGE.containsMatchIn(t)) return null
+        BPM_VALUE.find(t)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        if (!TIME_AGO.containsMatchIn(t) && !JUST_NOW.containsMatchIn(t)) {
+            val v = FIRST_INT.find(t)?.groupValues?.get(1)?.toIntOrNull()
+            if (v != null && v in 30..250) return v
+        }
+        return null
+    }
+
+    /** `"56.4 kg"` → 56.4f */
+    fun parseWeightKg(text: String): Float? =
+        KG_VALUE.find(normalize(text))?.groupValues?.get(1)?.toFloatOrNull()
 
     // ══════════════════════════════════════════════════════════════
     //  Screen: normalised nodes + label→value lookups
